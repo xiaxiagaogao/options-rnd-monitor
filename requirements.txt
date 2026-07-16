@@ -1,0 +1,8 @@
+thetadata>=1.0.9
+python-dotenv
+pyyaml
+numpy
+scipy
+pandas
+matplotlib
+httpx

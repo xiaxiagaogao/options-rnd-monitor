@@ -1,0 +1,16 @@
+# 标的池（spec §1/§2）：固定 3 + 动态 2。换出不删数据。
+fixed:
+  - SPY
+  - QQQ
+  - NVDA
+dynamic:
+  # 动态槽换入前必须通过链质量检查（spec §2）：
+  # ATM 邻域相对点差中位数 ≤ 5%；±20% moneyness 双边报价行权价 ≥ 20 个
+  []
+
+# 到期日规则（spec §1）
+expiry:
+  monthly_only: true
+  dte_min: 7
+  dte_max: 60
+  count: 2          # 最近两个月度各算一套

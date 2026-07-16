@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite3
+*.db
+.DS_Store
+ThetaTerminal*.jar
+theta_terminal/
+output/
+backup/
