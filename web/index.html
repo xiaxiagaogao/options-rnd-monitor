@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RND 仪表盘</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script src="/vendor/vue.global.prod.js"></script>
+  <script src="/vendor/echarts.min.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+
+  <!-- ===== 登录页 ===== -->
+  <div v-if="view==='login'" class="login-wrap">
+    <div class="login-card">
+      <div class="login-title">RND <span class="login-accent">仪表盘</span></div>
+      <div class="login-sub">风险中性密度 · EOD · 收盘后的世界地图</div>
+      <form @submit.prevent="doLogin">
+        <input v-model="password" type="password" placeholder="口令" autofocus />
+        <button type="submit">进入</button>
+      </form>
+      <div class="login-err" v-if="loginErr">{{ loginErr }}</div>
+      <div class="login-foot">单用户私有部署 · RN ≠ 真实概率 · 数据描述，不构成建议</div>
+    </div>
+  </div>
+
+  <!-- ===== 仪表盘 ===== -->
+  <div v-if="view==='dash'" class="page">
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-name">RND 仪表盘</span>
+        <span class="tag" v-if="detail">数据 {{ detail.date }} 收盘</span>
+      </div>
+      <div class="topbar-right">
+        <button v-for="s in symbols" :key="s"
+                class="pill" :class="{on: s===active}" @click="switchSymbol(s)">{{ s }}</button>
+        <span class="spacer"></span>
+        <template v-if="detail">
+          <span v-for="e in detail.expiries" :key="e.expiry"
+                class="chip" :class="{on: e.pinned===1}">
+            {{ e.pinned===1 ? '★ ' : '' }}{{ e.expiry.slice(5) }} · DTE {{ e.dte }}{{ e.pinned===1 ? '（钉）' : '' }}
+          </span>
+        </template>
+        <button class="chip ghost" @click="doLogout">退出</button>
+      </div>
+    </header>
+
+    <div class="strip" v-if="detail && ind">
+      <span class="seg strong">{{ detail.date }} 收盘</span>
+      <span class="seg">{{ active }} · 钉 {{ ind.expiry.slice(5) }}（DTE {{ ind.dte }}）</span>
+      <span class="seg">F <b>{{ fmt(ind.forward,1) }}</b></span>
+      <span class="seg">±1σ <b>±{{ fmt(ind.sigma1_abs,1) }}</b>（±{{ fmt(ind.sigma1_pct*100,1) }}%）</span>
+      <span class="seg"><span class="lamp" :class="ind.gate_pass ? 'ok':'bad'"></span>
+        闸门 {{ ind.gate_pass ? 'PASS' : 'FAIL' }}</span>
+      <span class="seg">{{ ind.n_modes>=2 ? '双峰 ◆' : '单峰' }}</span>
+      <span class="seg" v-if="myPosition">持仓 · 冻结 {{ myPosition.stop_q.toUpperCase() }}
+        {{ fmt(frozenStop,1) }} · 偏移 <b>{{ offsetSigma }}</b></span>
+      <span class="seg" v-else>无持仓</span>
+      <span class="seg faint">EOD · 次日 07:00 JST 更新</span>
+    </div>
+
+    <div class="layout">
+
+      <!-- 左栏 · 驾驶舱 -->
+      <aside class="sidebar">
+        <div class="zone-tag">驾驶舱 · 今天哪个标的有事</div>
+        <div v-for="o in overview" :key="o.symbol"
+             class="sym" :class="{on: o.symbol===active}" @click="switchSymbol(o.symbol)">
+          <div class="row">
+            <span class="sym-name">{{ o.symbol }}</span>
+            <span v-if="o.ready" class="gate-mini">
+              <span class="lamp" :class="o.gate_pass ? 'ok':'bad'"></span>
+              {{ o.gate_pass ? 'PASS' : 'FAIL' }}</span>
+          </div>
+          <div class="badges" v-if="o.ready">
+            <span class="badge" v-if="o.atm_iv_pct!=null">IV P{{ Math.round(o.atm_iv_pct) }}</span>
+            <span class="badge warn" v-for="x in o.extremes.slice(0,2)" :key="x.indicator">
+              ⚠ {{ x.label }} P{{ Math.round(x.pct) }}</span>
+            <span class="badge" v-if="o.n_modes>=2">◆ 双峰</span>
+            <span class="badge" v-if="o.positions">● 持仓 {{ o.positions }}</span>
+          </div>
+          <div class="annot">{{ o.ready ? (o.extremes.length ? '有极端分位 · 点开看' : '无极端分位 · 平静') : '数据未就绪' }}</div>
+        </div>
+
+        <div class="card">
+          <div class="row card-head"><span class="card-title">事件流</span>
+            <span class="annot">与图上标记同源</span></div>
+          <div v-for="(e,i) in events" :key="i" class="evitem" @click="switchSymbol(e.symbol)">
+            <span class="evdate">{{ e.date.slice(5) }}</span>
+            <span class="evglyph">{{ e.glyph }}</span>
+            <span>{{ e.symbol }} {{ e.text }}</span>
+          </div>
+          <div v-if="!events.length" class="annot" style="padding:8px 0">近 90 日无事件</div>
+        </div>
+
+        <div class="card">
+          <div class="row card-head"><span class="card-title">添加标的</span>
+            <span class="annot">动态槽 {{ poolStatus.slots || '—' }}</span></div>
+          <div class="fx gap6" style="display:flex">
+            <input v-model="admSymbol" placeholder="代码，如 AMD" class="adm-input"
+                   @keyup.enter="runAdmission" />
+            <button class="chip" @click="runAdmission" :disabled="admBusy">
+              {{ admBusy ? '体检中…' : '准入检查' }}</button>
+          </div>
+          <div v-if="admResult" style="margin-top:8px">
+            <template v-if="admResult.ok">
+              <div class="row">
+                <span class="card-title">{{ admResult.symbol }}</span>
+                <span class="badge" :class="admResult.verdict ? '' : 'warn'"
+                      style="font-weight:700">{{ admResult.verdict ? 'PASS' : 'FAIL' }}</span>
+              </div>
+              <div class="qrow"><span class="muted">ATM 点差中位</span>
+                <span class="qv" :style="{color: admResult.checks.atm_spread_ok ? '#3E7A52':'#A33B2E'}">
+                  {{ (admResult.metrics.atm_spread_med*100).toFixed(2) }}% / ≤3%</span></div>
+              <div class="qrow"><span class="muted">±20% 双边行权价</span>
+                <span class="qv" :style="{color: admResult.checks.coverage_ok ? '#3E7A52':'#A33B2E'}">
+                  {{ admResult.metrics.n_two_sided_strikes }} / ≥15</span></div>
+              <div class="annot" style="margin-top:4px">
+                参照：<span v-for="p in admPool" :key="p.symbol">{{ p.symbol }}
+                {{ (p.atm_spread_med*100).toFixed(1) }}%·{{ p.n_two_sided_strikes }}　</span></div>
+              <button v-if="admResult.verdict" class="btn" style="width:100%;margin-top:8px;padding:8px;border:none;border-radius:4px;background:#26241F;color:#FFF;cursor:pointer"
+                      @click="poolAdd" :disabled="admBusy">换入并回填 3 年（后台约 1–3 小时）</button>
+            </template>
+            <div v-else class="login-err">{{ admResult.error }}</div>
+          </div>
+          <div v-for="d in poolStatus.dynamic" :key="d.symbol" class="qrow">
+            <span class="muted">{{ d.symbol }}</span>
+            <span style="font-size:11px">{{ d.running ? (d.progress || '回填中…')
+              : (d.progress==='完成' || d.latest ? '就绪 · ' + (d.latest||'') : '等待回填') }}</span>
+          </div>
+          <div class="login-err" v-if="admErr">{{ admErr }}</div>
+        </div>
+
+        <div class="card dashed">
+          <div class="row"><span style="font-size:14px">✳</span>
+            <span class="card-title">研究助手</span><span class="annot">接入预留</span></div>
+          <div class="annot" style="margin-top:4px">只读本地五表 · 输出为数据描述非建议</div>
+        </div>
+      </aside>
+
+      <!-- 主区 -->
+      <main class="main">
+
+        <div class="zone"><span class="zone-tag">罗盘 · 持仓诊断</span>
+          <span class="annot">回答：我的持仓理由现在怎么样了</span></div>
+
+        <div class="grid-21">
+          <div class="card pad">
+            <div class="row card-head">
+              <span class="card-title">收盘价 × 分位扇形带 × 冻结线</span>
+              <span class="chips">
+                <button v-for="d in [60,120,250]" :key="d" class="chip"
+                        :class="{on: fanDays===d}" @click="fanDays=d; loadFan()">{{ d }} 日</button>
+              </span>
+            </div>
+            <div ref="fanChart" class="chart" style="height:320px"></div>
+            <div class="estrip">
+              <span class="strong">事件条带</span><span>● roll</span><span>▮ 闸门置灰</span>
+              <span>◆ 双峰</span><span class="faint">竖线标注于图内 · 点左栏事件流可切标的</span>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="card pad" v-if="ind">
+              <div class="row card-head"><span class="card-title">关键位</span>
+                <span class="annot">◌ = 落在外推区</span></div>
+              <div class="qrow" v-for="k in ['q95','q75']" :key="k">
+                <span class="muted">{{ k.toUpperCase() }}{{ k==='q95' ? ' 止盈参考':'' }}</span>
+                <span class="qv"><span class="dot" :class="ind[k+'_in_range'] ? 'in':'out'"></span>
+                  {{ fmt(ind[k],1) }}</span></div>
+              <div class="qrow"><span class="muted">众数（密度峰）</span>
+                <span class="qv">{{ fmt(ind.mode,1) }}</span></div>
+              <div class="qrow"><span class="muted">Q50 中位</span>
+                <span class="qv"><span class="dot" :class="ind.q50_in_range ? 'in':'out'"></span>
+                  {{ fmt(ind.q50,1) }}</span></div>
+              <div class="qrow frow"><span class="strong">F 隐含远期</span>
+                <span class="qv big">{{ fmt(ind.forward,1) }}</span></div>
+              <div class="qrow"><span class="muted">Q25 投机失效线</span>
+                <span class="qv"><span class="dot" :class="ind.q25_in_range ? 'in':'out'"></span>
+                  {{ fmt(ind.q25,1) }}</span></div>
+              <div class="qrow"><span class="muted">Q05 信念失效线</span>
+                <span class="qv"><span class="dot" :class="ind.q05_in_range ? 'in':'out'"></span>
+                  {{ fmt(ind.q05,1) }}</span></div>
+            </div>
+
+            <div class="card pad">
+              <div class="row card-head"><span class="card-title">持仓 · 冻结线</span>
+                <span v-if="myPosition" class="gate-mini">
+                  <span class="lamp" :class="stopBreached ? 'bad':'ok'"></span>
+                  <span :style="{color: stopBreached ? '#A33B2E':'#3E7A52', fontWeight:600, fontSize:'12px'}">
+                    {{ stopBreached ? '收盘确认失效！' : '未触发' }}</span></span>
+              </div>
+              <template v-if="myPosition">
+                <div class="muted" style="font-size:12px">
+                  {{ myPosition.direction==='long'?'多':'空' }} {{ myPosition.symbol }} ·
+                  入场 {{ myPosition.event_date }} @ {{ fmt(myPosition.entry_price,1) }} ·
+                  {{ myPosition.identity==='conviction'?'信念（钉 Q05）':'投机（钉 Q25）' }}
+                </div>
+                <div class="trio">
+                  <div><div class="tname">冻结 {{ myPosition.stop_q.toUpperCase() }}</div>
+                    <div class="tval">{{ fmt(frozenStop,1) }}</div></div>
+                  <div><div class="tname">实时 {{ myPosition.stop_q.toUpperCase() }}</div>
+                    <div class="tval">{{ fmt(ind[myPosition.stop_q],1) }}</div></div>
+                  <div><div class="tname">偏移量</div><div class="tval">{{ offsetSigma }}</div></div>
+                </div>
+                <div class="annot" style="border-top:1px dashed #E4E1D9;padding-top:6px">
+                  size：{{ myPosition.size ?? '—' }} · 预算 ${{ myPosition.risk_budget ?? '—' }}
+                  <button class="chip ghost" style="float:right" @click="closePosition">平仓</button>
+                </div>
+              </template>
+              <template v-else>
+                <div class="annot" style="margin-bottom:8px">无持仓 · 录入后冻结当日分位快照（永不重画）</div>
+                <div class="form">
+                  <select v-model="form.direction"><option value="long">多</option><option value="short">空</option></select>
+                  <select v-model="form.identity">
+                    <option value="speculative">投机 · 钉 Q25</option>
+                    <option value="conviction">信念 · 钉 Q05</option></select>
+                  <input v-model="form.entry_price" placeholder="入场价" />
+                  <input v-model="form.risk_budget" placeholder="风险预算 $" />
+                  <input v-model="form.target_price" placeholder="目标价（可空）" />
+                  <input v-model="form.target_rationale" placeholder="目标>Q95 时必填理由" />
+                  <button class="btn" @click="openPosition">录入入场（冻结）</button>
+                </div>
+                <div class="login-err" v-if="journalErr">{{ journalErr }}</div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-3">
+          <div class="card pad">
+            <div class="row card-head"><span class="card-title">当日密度曲线</span>
+              <span class="annot" v-if="densityData.ok">rmse {{ fmt(densityData.fit_meta.fit_rmse_iv,4) }}
+                · s×{{ densityData.fit_meta.s_multiplier }}</span></div>
+            <div ref="densityChart" class="chart" style="height:190px"></div>
+            <div class="annot">左尾肥 = smirk 常态 · 灰带 = 外推区（显式声明）</div>
+          </div>
+          <div class="card pad">
+            <div class="row card-head"><span class="card-title">密度时序热力图 · 世界地图</span></div>
+            <div ref="heatChart" class="chart" style="height:190px"></div>
+            <div class="annot">3 年分布演化 × 现货路径（青线）</div>
+          </div>
+          <div class="card pad">
+            <div class="row card-head"><span class="card-title">双日分布对比</span>
+              <span class="chips">
+                <button class="chip" :class="{on: cmpMode==='entry'}"
+                        @click="cmpMode='entry'; loadCompare()">入场日 vs 今日</button>
+                <button class="chip" :class="{on: cmpMode==='prev'}"
+                        @click="cmpMode='prev'; loadCompare()">昨 vs 今</button>
+              </span></div>
+            <div ref="cmpChart" class="chart" style="height:190px"></div>
+            <div class="annot">{{ cmpLabel }}</div>
+          </div>
+        </div>
+
+        <div class="zone"><span class="zone-tag">雷达 · 状态异动</span>
+          <span class="annot">252 日滚动分位 · 闸门不过整卡置灰 · 对照 {{ detail ? detail.benchmark : '' }}</span></div>
+
+        <div class="tiles" v-if="detail">
+          <div v-for="s in detail.states" :key="s.indicator"
+               class="tile" :class="{off: s.pct==null}"
+               @click="s.pct==null && openDiagnostics()">
+            <div class="row"><span class="tname">{{ s.label }}</span>
+              <span class="tvs" :class="{hot: s.bench_pct>=90 || s.bench_pct<=10}">
+                {{ detail.benchmark }} {{ s.bench_pct!=null ? 'P'+Math.round(s.bench_pct) : '—' }}</span></div>
+            <div class="row">
+              <span class="tval">{{ fmtIndicator(s.indicator, s.value) }}</span>
+              <span class="tpct" v-if="s.pct!=null">P{{ Math.round(s.pct) }}
+                <span class="tdelta">Δ{{ s.dpct!=null ? (s.dpct>0?'+':'')+s.dpct.toFixed(1) : '—' }}</span></span>
+              <span class="tpct muted" v-else>静默</span>
+            </div>
+            <div class="band"><span v-if="s.pct!=null" class="mark" :style="{left: s.pct+'%'}"></span></div>
+            <div class="tsay">{{ s.pct!=null ? s.saying
+              : (s.value==null ? '当日无此读数（如仅剩一个到期）'
+                : (s.sample_n<60 ? '样本<60 · 防假精确' : '闸门未过 · 点卡开诊断')) }}</div>
+          </div>
+        </div>
+
+        <div class="grid-3">
+          <div class="card pad" v-if="ind">
+            <div class="row card-head"><span class="card-title">双峰事件灯</span>
+              <span class="chip" :class="{on: ind.n_modes>=2}">
+                {{ ind.n_modes>=2 ? '◆ 今日双峰' : '今日：不亮' }}</span></div>
+            <template v-if="ind.n_modes>=2">
+              <div class="qrow" v-for="(m,i) in detail.modes" :key="i">
+                <span class="muted">峰 {{ i+1 }}</span>
+                <span class="qv">{{ fmt(m.strike,0) }} · 质量 {{ (m.mass*100).toFixed(0) }}%</span></div>
+            </template>
+            <div v-else class="placeholder" style="height:96px">
+              最近一次双峰：{{ lastBimodal || '窗口内无' }}</div>
+            <div class="annot" style="margin-top:6px">财报二元定价探测器 · 触发时报两峰位置 + 概率质量</div>
+          </div>
+          <div class="card pad">
+            <div class="row card-head"><span class="card-title">ΔCDF 质量迁移（昨 → 今）</span>
+              <span class="annot" v-if="dcdfData.ok">
+                位移 {{ fmt(dcdfData.wasserstein,2) }} · 净向{{ dcdfData.net_shift>0?'上':'下' }}</span></div>
+            <div ref="dcdfChart" class="chart" style="height:120px"></div>
+            <div class="annot" v-if="dcdfData.ok && !dcdfData.comparable" style="color:#8F5C22">
+              ⚠ 跨 roll 日（{{ dcdfData.expiries[0].slice(5) }} → {{ dcdfData.expiries[1].slice(5) }}），到期不同不可比</div>
+            <div class="annot" v-else>正区 = 质量流向该价位下方 · 带符号面积 = 位移距离</div>
+          </div>
+          <div class="card pad">
+            <div class="row card-head"><span class="card-title">尾部不对称时序</span>
+              <span class="annot" v-if="tailRatio">当前 下/上 = {{ tailRatio }}</span></div>
+            <div ref="tailChart" class="chart" style="height:120px"></div>
+            <div class="annot">P(下尾) vs P(上尾) · RN 口径含保费，看相对变化不看绝对值</div>
+          </div>
+        </div>
+
+        <div class="zone"><span class="zone-tag">温度计 · 环境与成本</span>
+          <span class="annot">低频查看</span></div>
+
+        <div class="grid-3">
+          <div class="card pad" v-if="detail">
+            <div class="row card-head"><span class="card-title">期限结构</span></div>
+            <div class="qrow" v-for="e in detail.expiries" :key="e.expiry">
+              <span class="muted">{{ e.expiry.slice(5) }} · DTE {{ e.dte }}{{ e.pinned? '（钉）':'' }}</span>
+              <span class="qv">{{ e.atm_iv!=null ? (e.atm_iv*100).toFixed(1)+'%' : '—' }}</span></div>
+            <div class="qrow"><span class="muted">斜率（近−次）</span>
+              <span class="qv">{{ termSlopeText }}</span></div>
+            <div class="annot">倒挂进高分位 = 事件压力计</div>
+          </div>
+          <div class="card pad">
+            <div class="row card-head"><span class="card-title">PIT 校准 · 尺子的偏差</span>
+              <span class="annot" v-if="pitData.ok">{{ pitData.n_expiries }} 个已到期 ·
+                {{ pitData.n_samples }} 重叠样本</span></div>
+            <div ref="pitChart" class="chart" style="height:110px"></div>
+            <div class="annot" v-if="pitData.ok">
+              名义 Q05 实际击穿 <b>{{ (pitData.breach_q05*100).toFixed(1) }}%</b> ·
+              名义 Q25 实际 <b>{{ (pitData.breach_q25*100).toFixed(1) }}%</b> ·
+              越过 Q95 <b>{{ (pitData.above_q95*100).toFixed(1) }}%</b>
+              —— 均匀 = 完美预测器；偏斜 = RN 保费楔子（预期内）</div>
+          </div>
+          <div class="card pad dashed">
+            <div class="row card-head"><span class="card-title muted">VRP 追踪</span>
+              <span class="chip">V1 占位</span></div>
+            <div class="placeholder faint">回填数据已备好 · 解锁条件：需区分赚方向还是赚波动时</div>
+          </div>
+        </div>
+
+        <div class="zone"><span class="zone-tag">底座 · 质量与运维</span>
+          <span class="annot">这些数字今天可信吗</span></div>
+
+        <div class="grid-21">
+          <div class="card pad">
+            <div class="row card-head"><span class="card-title">Smile 拟合诊断</span>
+              <button class="chip" @click="openDiagnostics">打开当日诊断</button></div>
+            <div ref="diagChart" class="chart" style="height:170px"></div>
+            <div class="annot" v-if="diagMeta">rmse {{ fmt(diagMeta.rmse,4) }} ·
+              s×{{ diagMeta.s_multiplier }} · n={{ diagMeta.n }} ·
+              wing [{{ fmt(diagMeta.wing_slopes?.lo,2) }}, {{ fmt(diagMeta.wing_slopes?.hi,2) }}]
+              —— 闸门的申诉通道</div>
+            <div class="annot" v-else>IV 散点 + 样条 + 外推段 —— 点「打开当日诊断」加载</div>
+          </div>
+          <div class="card pad" v-if="detail && ind">
+            <div class="row card-head"><span class="card-title">今日数据体检</span></div>
+            <div class="qrow"><span class="muted">数据日</span><span class="qv">{{ detail.date }}</span></div>
+            <div class="qrow"><span class="muted">闸门</span>
+              <span style="font-size:12px">{{ gateSummary }}</span></div>
+            <div class="qrow"><span class="muted">闸门明细（{{ active }}）</span>
+              <span style="font-size:12px">{{ gateDetailText }}</span></div>
+            <div class="qrow"><span class="muted">外推区分位</span>
+              <span style="font-size:12px">{{ outOfRangeCount }} 个</span></div>
+          </div>
+        </div>
+
+        <footer class="foot">
+          解读铁律：RN ≠ 真实概率（尾部含保费——当尺子准，当水晶球偏）· 分布中心钉在远期，本页不含方向观点 ·
+          左偏是常态，异常由 252 日分位判定 · 分位线只做收盘确认失效线，禁止当盘中硬止损 · 个股恐惧须与指数并排区分<br />
+          数据口径：ThetaData EOD · IV 自算 · SOFR 贴现 · 仅月度期权 · 钉 30 DTE + roll 打标 · 数据描述，不构成投资建议
+        </footer>
+      </main>
+    </div>
+  </div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

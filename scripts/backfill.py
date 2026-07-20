@@ -155,6 +155,8 @@ def main():
             ingest_symbol(conn, symbol, start, end, sofr)
         compute_symbol(conn, symbol, args.recompute)
         postprocess_symbol(conn, symbol)
+        from rnd.state import compute_state
+        compute_state(conn, symbol)
         n = conn.execute("SELECT COUNT(*), SUM(gate_pass) FROM rnd_indicators"
                          " WHERE symbol=?", (symbol,)).fetchone()
         print(f"  {symbol}: rnd_indicators {n[0]} 行，闸门通过 {n[1]}")

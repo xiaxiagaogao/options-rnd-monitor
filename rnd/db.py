@@ -68,6 +68,30 @@ CREATE TABLE IF NOT EXISTS rnd_state (
   sample_n  INTEGER,     -- 参与分位的有效样本数（闸门通过且非空）
   PRIMARY KEY (date, symbol, indicator)
 );
+
+-- 交易日志（spec §3 第 5 表，§6 纪律的载体）：append-only 事件流，同原始层待遇。
+-- open/roll_repin 事件写入当日全套分位快照后永不 UPDATE（冻结线机制保证）。
+CREATE TABLE IF NOT EXISTS trade_journal (
+  event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  position_id TEXT NOT NULL,          -- 同一持仓的事件串联 id
+  event_type  TEXT NOT NULL CHECK (event_type IN ('open','roll_repin','close')),
+  event_date  TEXT NOT NULL,
+  symbol      TEXT NOT NULL,
+  direction   TEXT,                   -- long / short
+  identity    TEXT,                   -- speculative(钉Q25) / conviction(钉Q05)
+  entry_price REAL,
+  frozen_expiry TEXT,
+  frozen_q05 REAL, frozen_q25 REAL, frozen_q50 REAL, frozen_q75 REAL, frozen_q95 REAL,
+  frozen_sigma1 REAL, frozen_forward REAL,
+  stop_q      TEXT,                   -- 'q25' / 'q05'
+  risk_budget REAL,
+  size        REAL,                   -- 反解结果（录入时代算）
+  target_price REAL,
+  target_rationale TEXT,              -- target > frozen_q95 时必填
+  close_price REAL,
+  close_reason TEXT,
+  notes       TEXT
+);
 """
 
 # 派生层可全量重算，加列走轻量迁移即可
