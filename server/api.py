@@ -144,9 +144,28 @@ def diagnostics(symbol: str, date: str, expiry: str):
 
 
 @app.post("/api/assistant", dependencies=[Depends(require_auth)])
-def assistant():
-    # 研究助手：接入预留（spec §8.5）。输出模板已定于 docs/hyai-design-reference.md §2。
-    raise HTTPException(501, "研究助手接入预留：等待选定模型与配额方案")
+def assistant(payload: dict = Body(...)):
+    """研究助手单次请求（research-assistant-framework §4）：装配→组提示→LLM→文本。
+
+    数值全部由服务端装配层钉死（§3），LLM 只组织语言。未配模型 → 503。
+    """
+    from . import assistant as asst
+    symbol = (payload.get("symbol") or "").upper()
+    question = (payload.get("question") or "").strip()
+    if not symbol or not question:
+        raise HTTPException(400, "缺少 symbol 或 question")
+    ctx = asst.build_context(symbol, payload.get("asof"))
+    if not ctx["meta"].get("asof"):
+        raise HTTPException(404, f"{symbol} 无可用数据")
+    msg = asst.build_messages(ctx, question)
+    try:
+        answer = asst.generate(msg["system"], msg["user"])
+    except asst.AssistantNotConfigured as e:
+        raise HTTPException(503, str(e))
+    except asst.AssistantError as e:
+        raise HTTPException(502, str(e))
+    # 附装配包：前端可据此渲染脚注（样本量/闸门/外推区）并审计"数据描述非编造"
+    return {"symbol": symbol, "asof": ctx["meta"]["asof"], "answer": answer, "context": ctx}
 
 
 app.mount("/vendor", StaticFiles(directory=WEB / "vendor"), name="vendor")

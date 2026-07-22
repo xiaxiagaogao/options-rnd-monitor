@@ -84,6 +84,12 @@
           <div class="annot">{{ o.ready ? (o.extremes.length ? '有极端分位 · 点开看' : '无极端分位 · 平静') : '数据未就绪' }}</div>
         </div>
 
+        <div class="card asst-entry" @click="goAssistant">
+          <div class="row"><span style="font-size:14px">✳</span>
+            <span class="card-title">研究助手</span><span class="annot">问答 · 每日汇报 →</span></div>
+          <div class="annot" style="margin-top:4px">只读本地五表 · 输出为数据描述非建议</div>
+        </div>
+
         <div class="card">
           <div class="row card-head"><span class="card-title">事件流</span>
             <span class="annot">与图上标记同源</span></div>
@@ -133,11 +139,6 @@
           <div class="login-err" v-if="admErr">{{ admErr }}</div>
         </div>
 
-        <div class="card dashed">
-          <div class="row"><span style="font-size:14px">✳</span>
-            <span class="card-title">研究助手</span><span class="annot">接入预留</span></div>
-          <div class="annot" style="margin-top:4px">只读本地五表 · 输出为数据描述非建议</div>
-        </div>
       </aside>
 
       <!-- 主区 -->
@@ -372,6 +373,66 @@
           数据口径：ThetaData EOD · IV 自算 · SOFR 贴现 · 仅月度期权 · 钉 30 DTE + roll 打标 · 数据描述，不构成投资建议
         </footer>
       </main>
+    </div>
+  </div>
+
+  <!-- ===== 研究助手 ===== -->
+  <div v-if="view==='assistant'" class="page asst-page">
+    <header class="topbar">
+      <div class="brand">
+        <button class="chip ghost" @click="backToDash">← 仪表盘</button>
+        <span class="brand-name">研究助手</span>
+        <span class="tag">Fable 5 · 数据描述非建议</span>
+      </div>
+      <div class="topbar-right">
+        <span class="annot">标的</span>
+        <button v-for="s in symbols" :key="s" class="pill" :class="{on: s===asSymbol}"
+                @click="asSymbol=s">{{ s }}</button>
+        <span class="spacer"></span>
+        <span class="chip">数据日 {{ asAsof || '—' }}</span>
+        <button class="chip ghost" @click="doLogout">退出</button>
+      </div>
+    </header>
+
+    <div class="asst-wrap">
+      <div class="ask-thread" ref="askThread">
+        <div v-if="!qa.length" class="ask-hello">
+          <div class="ask-hello-title">问 {{ asSymbol }} 的 RND 读数</div>
+          <div class="annot">只读本地五表 · 数值由服务端钉死 · 助手只组织语言，不算数、不下单、不表方向</div>
+          <div class="preset">
+            <button class="chip" v-for="p in presets" :key="p" @click="presetAsk(p)">{{ p }}</button>
+          </div>
+        </div>
+
+        <div v-for="(m,i) in qa" :key="i" class="qa">
+          <div class="q"><span class="q-sym">{{ m.symbol }}</span>{{ m.question }}</div>
+          <div class="a">
+            <div v-if="m.answer" class="md" v-html="md(m.answer)"></div>
+            <div v-else-if="m.error" class="login-err">{{ m.error }}</div>
+            <div v-else class="thinking">
+              <span class="spin"></span> Fable 5 深度推理中… <b>{{ asElapsed }}s</b>
+              <span class="annot"> · max effort，约 1–3 分钟，请稍候</span>
+            </div>
+            <div v-if="m.answer" class="a-foot">
+              <span class="annot">{{ m.symbol }} · 数据日 {{ m.asof }} · 用时 {{ m.secs }}s</span>
+              <button class="chip ghost" @click="toggleContext(i)">
+                {{ asExpanded[i] ? '收起数据包' : '装配数据包' }}</button>
+            </div>
+            <pre v-if="m.answer && asExpanded[i]" class="ctx">{{ JSON.stringify(m.context, null, 2) }}</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="ask-box">
+        <textarea v-model="asQuestion" rows="2" :disabled="asBusy"
+                  placeholder="问一句，如：现在偏度和尾部在什么水平？我的持仓要注意什么？（Enter 发送 · Shift+Enter 换行）"
+                  @keydown.enter.exact.prevent="askAssistant"></textarea>
+        <button class="btn ask-send" @click="askAssistant" :disabled="asBusy || !asQuestion.trim()">
+          {{ asBusy ? '生成中…' : '提问' }}</button>
+      </div>
+      <div class="ask-disc annot">
+        RN ≠ 真实概率（尾部含保费）· 分位线只做收盘确认失效线，非盘中止损 · 本页不含方向观点 · 数据描述，不构成投资建议
+      </div>
     </div>
   </div>
 </div>

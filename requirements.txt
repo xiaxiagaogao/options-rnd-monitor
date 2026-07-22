@@ -6,3 +6,7 @@ scipy
 pandas
 matplotlib
 httpx
+fastapi
+uvicorn
+itsdangerous
+anthropic

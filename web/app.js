@@ -3,6 +3,65 @@ const { createApp } = Vue;
 
 const PCT_INDICATORS = new Set(["atm_iv", "tail_p_down", "tail_p_up"]);
 
+// ---- 紧凑 Markdown → HTML（先转义再变换，v-html 安全；覆盖报告用到的构件）----
+function mdEscape(s) {
+  return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+function mdInline(s) {
+  return s
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+}
+function mdRow(line) {
+  return line.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+}
+function renderMarkdown(md) {
+  if (!md) return "";
+  const L = mdEscape(md).split("\n");
+  const isSep = s => /\|/.test(s) && /^[\s|:-]*-[\s|:-]*$/.test(s.trim());
+  const out = [];
+  let i = 0;
+  while (i < L.length) {
+    const line = L[i];
+    // 表格：本行含 | 且下一行是分隔行
+    if (/\|/.test(line) && i + 1 < L.length && isSep(L[i + 1])) {
+      const head = mdRow(line);
+      i += 2;
+      const rows = [];
+      while (i < L.length && /\|/.test(L[i]) && L[i].trim() !== "") { rows.push(mdRow(L[i])); i++; }
+      out.push("<table><thead><tr>" + head.map(h => "<th>" + mdInline(h) + "</th>").join("") +
+        "</tr></thead><tbody>" +
+        rows.map(r => "<tr>" + r.map(c => "<td>" + mdInline(c) + "</td>").join("") + "</tr>").join("") +
+        "</tbody></table>");
+      continue;
+    }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { out.push(`<h${h[1].length}>` + mdInline(h[2]) + `</h${h[1].length}>`); i++; continue; }
+    if (/^\s*---+\s*$/.test(line)) { out.push("<hr>"); i++; continue; }
+    if (/^\s*&gt;\s?/.test(line)) {  // > 已被 mdEscape 转成 &gt;
+      const buf = [];
+      while (i < L.length && /^\s*&gt;\s?/.test(L[i])) { buf.push(mdInline(L[i].replace(/^\s*&gt;\s?/, ""))); i++; }
+      out.push("<blockquote>" + buf.join("<br>") + "</blockquote>"); continue;
+    }
+    if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
+      const ordered = /^\s*\d+\.\s+/.test(line);
+      const items = [];
+      while (i < L.length && /^\s*([-*]|\d+\.)\s+/.test(L[i])) {
+        items.push(mdInline(L[i].replace(/^\s*([-*]|\d+\.)\s+/, ""))); i++;
+      }
+      out.push((ordered ? "<ol>" : "<ul>") + items.map(t => "<li>" + t + "</li>").join("") +
+        (ordered ? "</ol>" : "</ul>")); continue;
+    }
+    if (line.trim() === "") { i++; continue; }
+    const buf = [];
+    while (i < L.length && L[i].trim() !== "" && !/^(#{1,4}\s|\s*&gt;|\s*---+\s*$|\s*([-*]|\d+\.)\s)/.test(L[i]) &&
+      !(/\|/.test(L[i]) && i + 1 < L.length && isSep(L[i + 1]))) { buf.push(L[i]); i++; }
+    out.push("<p>" + mdInline(buf.join(" ")) + "</p>");
+  }
+  return out.join("\n");
+}
+
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
   const token = localStorage.getItem("rnd_token");
@@ -29,6 +88,11 @@ createApp({
             target_price: "", target_rationale: "" },
     journalErr: "",
     charts: {},
+    // 研究助手
+    asSymbol: "SPY", asQuestion: "", asBusy: false, asErr: "",
+    asElapsed: 0, asTimer: null, qa: [], asExpanded: {},
+    presets: ["现在偏度和尾部在什么水平？", "我这笔持仓要注意什么？",
+              "和指数并排有什么异常？", "今天闸门/拟合质量可信吗？"],
   }),
   computed: {
     ind() { return this.detail ? this.detail.indicators : null; },
@@ -85,9 +149,59 @@ createApp({
       const d = t.down[t.down.length - 1], u = t.up[t.up.length - 1];
       return u > 0 ? (d / u).toFixed(2) : null;
     },
+    asAsof() {
+      const o = this.overview.find(x => x.symbol === this.asSymbol);
+      return o && o.ready ? o.date : null;
+    },
   },
   methods: {
     fmt(v, n = 2) { return v == null ? "—" : Number(v).toFixed(n); },
+    md(text) { return renderMarkdown(text); },
+    // ---------- 研究助手 ----------
+    goAssistant() {
+      this.asSymbol = this.active || this.asSymbol;
+      history.pushState({ view: "assistant" }, "", "/assistant");
+      this.view = "assistant";
+    },
+    backToDash() {
+      history.pushState({ view: "dash" }, "", "/");
+      this.view = "dash";
+      this.$nextTick(() => Object.values(this.charts).forEach(c => c && c.resize()));
+    },
+    presetAsk(q) { this.asQuestion = q; this.askAssistant(); },
+    async askAssistant() {
+      const q = this.asQuestion.trim();
+      if (!q || this.asBusy) return;
+      this.asErr = "";
+      this.asBusy = true;
+      this.asElapsed = 0;
+      this.asTimer = setInterval(() => { this.asElapsed += 1; }, 1000);
+      const entry = { symbol: this.asSymbol, question: q, answer: null,
+                      asof: this.asAsof, context: null, secs: null };
+      this.qa.push(entry);
+      this.asQuestion = "";
+      this.$nextTick(() => this.scrollAsk());
+      try {
+        const r = await api("/api/assistant", { method: "POST",
+          body: JSON.stringify({ symbol: this.asSymbol, question: q }) });
+        entry.answer = r.answer;
+        entry.asof = r.asof;
+        entry.context = r.context;
+      } catch (e) {
+        if (e.auth) { this.view = "login"; }
+        else { entry.error = e.detail || "生成失败"; this.asErr = entry.error; }
+      } finally {
+        clearInterval(this.asTimer);
+        entry.secs = this.asElapsed;
+        this.asBusy = false;
+        this.$nextTick(() => this.scrollAsk());
+      }
+    },
+    scrollAsk() {
+      const el = this.$refs.askThread;
+      if (el) el.scrollTop = el.scrollHeight;
+    },
+    toggleContext(i) { this.asExpanded[i] = !this.asExpanded[i]; },
     fmtIndicator(name, v) {
       if (v == null) return "—";
       if (PCT_INDICATORS.has(name)) return (v * 100).toFixed(1) + "%";
@@ -120,6 +234,7 @@ createApp({
         await this.switchSymbol(ready ? ready.symbol : this.symbols[0]);
         this.events = (await api("/api/events")).events.slice(0, 12);
         this.refreshPool();
+        if (location.pathname === "/assistant") { this.asSymbol = this.active; this.view = "assistant"; }
       } catch (e) {
         if (e.auth) this.view = "login"; else throw e;
       }
@@ -439,6 +554,11 @@ createApp({
     this.boot();
     window.addEventListener("resize", () => {
       Object.values(this.charts).forEach(c => c && c.resize());
+    });
+    window.addEventListener("popstate", () => {
+      if (this.view === "login" || this.view === "boot") return;
+      if (location.pathname === "/assistant") { this.view = "assistant"; }
+      else { this.view = "dash"; this.$nextTick(() => Object.values(this.charts).forEach(c => c && c.resize())); }
     });
   },
 }).mount("#app");
