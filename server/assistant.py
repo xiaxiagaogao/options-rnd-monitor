@@ -82,6 +82,28 @@ def build_messages(ctx: dict, question: str) -> dict:
     return {"system": SYSTEM_PROMPT, "user": user}
 
 
+def build_digest_messages(symbols: list[str]) -> tuple[dict, str | None]:
+    """多标的 → 一条 TG 纯文本综合收盘摘要（framework §2.3；用户选"一条综合摘要"）。
+
+    复用九纪律 SYSTEM_PROMPT，只把 ask 换成"多标的短摘要、纯文本无表格"。返回 (messages, asof)。
+    """
+    packs = {s: build_context(s) for s in symbols}
+    asof = next((p["meta"]["asof"] for p in packs.values() if p["meta"].get("asof")), None)
+    body = json.dumps(packs, ensure_ascii=False, indent=2, default=str)
+    user = (
+        f"以下是 {', '.join(symbols)} 在数据日 {asof} 的结构化上下文包"
+        f"（唯一数值来源，禁止另算）：\n\n```json\n{body}\n```\n\n"
+        "任务：出一条 **Telegram 纯文本** 的收盘综合摘要（不是单标的长报告）。要求：\n"
+        "- 每标的 2–4 行：钉的到期/DTE、F 与 ±1σ%、最值得看的 1–2 个状态分位"
+        "（注明 P 分位与日变 Δ）、闸门状态；有持仓的标的补一行冻结失效线与偏移；"
+        "今日有异动（分位穿越 P90/P10、双峰、持仓偏移>1σ）的点出来。\n"
+        "- **纯文本，不要 markdown 表格 / # / **加粗**（TG 不渲染）**，用 ·、—、缩进和换行组织，可用少量 emoji。\n"
+        "- 守全部纪律：RN≠真实、不表方向、样本<60 不报分位、闸门 FAIL 静默、逐分位 in_range=False 降级披露。\n"
+        "- 末尾一行免责（数据描述非建议）。整体简洁，手机一两屏读完。"
+    )
+    return {"system": SYSTEM_PROMPT, "user": user}, asof
+
+
 def generate(system: str, user: str, *, max_tokens: int = 16000) -> str:
     """单次请求（framework §4）：装配好的提示 → LLM → 文本。这是唯一的模型接缝。
 

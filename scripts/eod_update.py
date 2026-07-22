@@ -93,6 +93,17 @@ def main():
     from rnd.journal import roll_repin_check
     for r in roll_repin_check(conn):
         print(f"  roll_repin: {r['symbol']} {r['position_id']} {r['from']} → {r['to']}")
+
+    # TG 推送（framework §2.3）：异动 + 综合摘要。失败/未配不影响数据更新。
+    conn.close()
+    try:
+        from push_daily import run as push_run
+        from rnd.telegram import TelegramNotConfigured
+        print("推送:", push_run(symbols) or "无内容")
+    except TelegramNotConfigured as e:
+        print(f"推送: 跳过（{e}）")
+    except Exception as e:  # noqa: BLE001
+        print(f"推送: 失败但不影响数据（{type(e).__name__}: {e}）")
     print("完成。")
 
 
