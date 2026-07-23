@@ -192,5 +192,11 @@ app.mount("/vendor", StaticFiles(directory=WEB / "vendor"), name="vendor")
 def spa(path: str):
     target = WEB / path
     if path and target.is_file():
-        return FileResponse(target)
-    return FileResponse(WEB / "index.html")
+        resp = FileResponse(target)
+        # 业务前端资源禁止强缓存，避免 VPS 发版后仍命中旧 app.js 导致标的错位
+        if target.suffix.lower() in {".js", ".css", ".html"}:
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+    resp = FileResponse(WEB / "index.html")
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp

@@ -47,9 +47,13 @@
       </div>
     </header>
 
+    <div class="strip" v-if="loadingSym && !detail">
+      <span class="seg strong">{{ active }} 加载中…</span>
+      <span class="seg faint">切换标的，等待数据对齐</span>
+    </div>
     <div class="strip" v-if="detail && ind">
       <span class="seg strong">{{ detail.date }} 收盘</span>
-      <span class="seg">{{ active }} · 钉 {{ ind.expiry.slice(5) }}（DTE {{ ind.dte }}）</span>
+      <span class="seg">{{ detail.symbol || active }} · 钉 {{ ind.expiry.slice(5) }}（DTE {{ ind.dte }}）</span>
       <span class="seg">F <b>{{ fmt(ind.forward,1) }}</b></span>
       <span class="seg">±1σ <b>±{{ fmt(ind.sigma1_abs,1) }}</b>（±{{ fmt(ind.sigma1_pct*100,1) }}%）</span>
       <span class="seg"><span class="lamp" :class="ind.gate_pass ? 'ok':'bad'"></span>

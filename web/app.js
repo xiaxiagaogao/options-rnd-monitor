@@ -66,7 +66,8 @@ async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
   const token = localStorage.getItem("rnd_token");
   if (token) headers["X-Auth"] = token;
-  const r = await fetch(path, { headers, credentials: "same-origin", ...opts });
+  // cache: no-store 避免切换标的时命中浏览器 GET 缓存造成错位
+  const r = await fetch(path, { cache: "no-store", headers, credentials: "same-origin", ...opts });
   if (r.status === 401 && path !== "/api/login") throw { auth: true };
   if (!r.ok) throw await r.json().catch(() => ({ detail: r.statusText }));
   return r.json();
@@ -80,6 +81,7 @@ createApp({
     active: "SPY", detail: null, fanData: null, fanDays: 120,
     densityData: { ok: false }, heatData: null,
     dcdfData: { ok: false }, pitData: { ok: false },
+    switchSeq: 0, loadingSym: false,
     admSymbol: "", admBusy: false, admResult: null, admPool: [], admErr: "",
     poolStatus: {}, poolTimer: null,
     cmpMode: "prev", cmpLabel: "",
@@ -262,18 +264,47 @@ createApp({
       }
     },
     async switchSymbol(sym) {
+      if (!sym) return;
+      // 序号令牌：丢弃过期的并发切换结果，防止 active=NVDA 却写入 QQQ 数据
+      const seq = ++this.switchSeq;
       this.active = sym;
+      this.loadingSym = true;
       this.diagMeta = null;
-      this.detail = await api(`/api/symbol/${sym}`);
-      await this.$nextTick();   // 等 v-if 区块挂载，避免图表在零宽容器上初始化
-      await Promise.all([this.loadFan(), this.loadDensity(), this.loadHeatmap(),
-                        this.loadDcdf(), this.loadPit()]);
-      await this.loadCompare();
-      this.renderTails();
-      if (this.charts.diagChart) { this.charts.diagChart.clear(); this.diagMeta = null; }
-      // 兜底：容器尺寸迟到时（慢渲染环境）延迟重排一次
-      setTimeout(() => Object.values(this.charts).forEach(c => c && c.resize()), 600);
+      // 立刻清空旧标的数据，避免标签已切走但数值/图仍显示上一个标的
+      this.detail = null;
+      this.fanData = null;
+      this.densityData = { ok: false };
+      this.heatData = null;
+      this.dcdfData = { ok: false };
+      this.pitData = { ok: false };
+      this.cmpLabel = "";
+      Object.values(this.charts).forEach(c => c && c.clear());
+      try {
+        const detail = await api(`/api/symbol/${sym}`);
+        if (seq !== this.switchSeq) return;
+        this.detail = detail;
+        await this.$nextTick();   // 等 v-if 区块挂载，避免图表在零宽容器上初始化
+        if (seq !== this.switchSeq) return;
+        // 显式传 sym/seq，不依赖 this.active（并发切换时 active 会变）
+        await Promise.all([
+          this.loadFan(sym, seq), this.loadDensity(sym, seq), this.loadHeatmap(sym, seq),
+          this.loadDcdf(sym, seq), this.loadPit(sym, seq),
+        ]);
+        if (seq !== this.switchSeq) return;
+        await this.loadCompare(sym, seq);
+        if (seq !== this.switchSeq) return;
+        this.renderTails();
+        if (this.charts.diagChart) { this.charts.diagChart.clear(); this.diagMeta = null; }
+        // 兜底：容器尺寸迟到时（慢渲染环境）延迟重排一次
+        setTimeout(() => {
+          if (seq !== this.switchSeq) return;
+          Object.values(this.charts).forEach(c => c && c.resize());
+        }, 600);
+      } finally {
+        if (seq === this.switchSeq) this.loadingSym = false;
+      }
     },
+    _stale(seq) { return seq != null && seq !== this.switchSeq; },
     chart(refName) {
       const el = this.$refs[refName];
       if (!el) return null;
@@ -288,8 +319,10 @@ createApp({
       return this.charts[refName];
     },
     // ---------- 扇形带主图 ----------
-    async loadFan() {
-      this.fanData = await api(`/api/symbol/${this.active}/fan?days=${this.fanDays}`);
+    async loadFan(sym = this.active, seq = this.switchSeq) {
+      const fanData = await api(`/api/symbol/${sym}/fan?days=${this.fanDays}`);
+      if (this._stale(seq)) return;
+      this.fanData = fanData;
       const f = this.fanData, dates = f.dates;
       const closes = dates.map(d => f.close[d] ?? null);
       const diff = (a, b) => a.map((v, i) => v == null || b[i] == null ? null : v - b[i]);
@@ -331,10 +364,12 @@ createApp({
       }, true);
     },
     // ---------- 当日密度 ----------
-    async loadDensity() {
-      this.densityData = await api(`/api/symbol/${this.active}/density`);
+    async loadDensity(sym = this.active, seq = this.switchSeq) {
+      const densityData = await api(`/api/symbol/${sym}/density`);
+      if (this._stale(seq)) return;
+      this.densityData = densityData;
       const d = this.densityData;
-      if (!d.ok) return;
+      if (!d.ok) { this.chart("densityChart")?.clear(); return; }
       const posts = Object.entries(d.quantiles).map(([k, v]) => ({
         xAxis: v,
         label: { formatter: k.toUpperCase(), fontSize: 9, color: d.in_range[k] ? "#6E6A60" : "#B0783A" },
@@ -362,8 +397,10 @@ createApp({
       }, true);
     },
     // ---------- 热力图 ----------
-    async loadHeatmap() {
-      this.heatData = await api(`/api/symbol/${this.active}/heatmap`);
+    async loadHeatmap(sym = this.active, seq = this.switchSeq) {
+      const heatData = await api(`/api/symbol/${sym}/heatmap`);
+      if (this._stale(seq)) return;
+      this.heatData = heatData;
       const h = this.heatData;
       const closeIdx = h.dates.map(d => {
         const c = h.close[d];
@@ -387,7 +424,7 @@ createApp({
       }, true);
     },
     // ---------- 双日对比 ----------
-    async loadCompare() {
+    async loadCompare(sym = this.active, seq = this.switchSeq) {
       const d = this.detail;
       if (!d) return;
       let otherDate = null, label = "";
@@ -400,13 +437,15 @@ createApp({
         label = otherDate ? `${otherDate}（虚）vs 今日（实）` : "";
         if (this.cmpMode === "entry") label = "无持仓 · 退回 昨 vs 今";
       }
+      if (this._stale(seq)) return;
       this.cmpLabel = label;
-      if (!otherDate) return;
+      if (!otherDate) { this.chart("cmpChart")?.clear(); return; }
       const [a, b] = await Promise.all([
-        api(`/api/symbol/${this.active}/density?date=${otherDate}`),
+        api(`/api/symbol/${sym}/density?date=${otherDate}`),
         Promise.resolve(this.densityData),
       ]);
-      if (!a.ok || !b.ok) { this.cmpLabel = "对比日无曲线"; return; }
+      if (this._stale(seq)) return;
+      if (!a.ok || !b.ok) { this.cmpLabel = "对比日无曲线"; this.chart("cmpChart")?.clear(); return; }
       this.chart("cmpChart")?.setOption({
         animation: false,
         grid: { left: 8, right: 8, top: 10, bottom: 20 },
@@ -423,10 +462,12 @@ createApp({
       }, true);
     },
     // ---------- ΔCDF 迁移 ----------
-    async loadDcdf() {
-      this.dcdfData = await api(`/api/symbol/${this.active}/dcdf`);
+    async loadDcdf(sym = this.active, seq = this.switchSeq) {
+      const dcdfData = await api(`/api/symbol/${sym}/dcdf`);
+      if (this._stale(seq)) return;
+      this.dcdfData = dcdfData;
       const d = this.dcdfData;
-      if (!d.ok) return;
+      if (!d.ok) { this.chart("dcdfChart")?.clear(); return; }
       this.chart("dcdfChart")?.setOption({
         animation: false,
         grid: { left: 8, right: 8, top: 8, bottom: 18 },
@@ -444,10 +485,12 @@ createApp({
       }, true);
     },
     // ---------- PIT 校准 ----------
-    async loadPit() {
-      this.pitData = await api(`/api/symbol/${this.active}/pit`);
+    async loadPit(sym = this.active, seq = this.switchSeq) {
+      const pitData = await api(`/api/symbol/${sym}/pit`);
+      if (this._stale(seq)) return;
+      this.pitData = pitData;
       const p = this.pitData;
-      if (!p.ok) return;
+      if (!p.ok) { this.chart("pitChart")?.clear(); return; }
       const uniform = p.n_samples / 10;
       this.chart("pitChart")?.setOption({
         animation: false,
