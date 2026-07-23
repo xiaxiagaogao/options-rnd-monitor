@@ -409,6 +409,12 @@ createApp({
         h.prices.forEach((p, i) => { const dd = Math.abs(p - c); if (dd < bd) { bd = dd; best = i; } });
         return best;
       });
+      // 拆股日竖线（数据已复权到现股口径，线只作事件锚点）
+      const splitMarks = (h.splits || []).map(s => ({
+        xAxis: s.date,
+        label: { formatter: s.factor_label || "拆股", fontSize: 9, color: "#8F5C22" },
+        lineStyle: { color: "#B0783A", type: "dashed", width: 1.2 },
+      }));
       this.chart("heatChart")?.setOption({
         animation: false,
         grid: { left: 44, right: 6, top: 6, bottom: 20 },
@@ -419,7 +425,8 @@ createApp({
         tooltip: { show: false },
         series: [
           { type: "heatmap", data: h.cells, progressive: 4000, emphasis: { disabled: true } },
-          { type: "line", data: closeIdx, symbol: "none", lineStyle: { color: "#2F8F8F", width: 1.4 } },
+          { type: "line", data: closeIdx, symbol: "none", lineStyle: { color: "#2F8F8F", width: 1.4 },
+            markLine: splitMarks.length ? { symbol: "none", silent: true, data: splitMarks } : undefined },
         ],
       }, true);
     },

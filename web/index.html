@@ -243,9 +243,18 @@
             <div class="annot">左尾肥 = smirk 常态 · 灰带 = 外推区（显式声明）</div>
           </div>
           <div class="card pad">
-            <div class="row card-head"><span class="card-title">密度时序热力图 · 世界地图</span></div>
+            <div class="row card-head"><span class="card-title">密度时序热力图 · 世界地图</span>
+              <span class="annot" v-if="heatData && heatData.adjusted">现股复权
+                <template v-if="heatData.splits && heatData.splits.length">
+                  · {{ heatData.splits.map(s => s.factor_label).join(' / ') }}
+                </template>
+              </span>
+            </div>
             <div ref="heatChart" class="chart" style="height:190px"></div>
-            <div class="annot">3 年分布演化 × 现货路径（青线）</div>
+            <div class="annot">3 年分布演化 × 现货路径（青线）
+              <template v-if="heatData && heatData.adjusted"> · 历史已按拆合股复权到现股口径，虚线=事件日</template>
+              <template v-else> · 未侦测到拆合股跳变</template>
+            </div>
           </div>
           <div class="card pad">
             <div class="row card-head"><span class="card-title">双日分布对比</span>

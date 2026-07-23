@@ -208,8 +208,58 @@ def density(symbol: str, date: str | None = None, expiry: str | None = None) -> 
     }
 
 
+def _detect_price_splits(dates: list[str], close_by_date: dict, thr: float = 0.35) -> list[dict]:
+    """从收盘价跳变识别拆合股。ratio = 新收盘/旧收盘（10:1 拆股 ≈ 0.1）。"""
+    splits = []
+    prev_c = None
+    for d in dates:
+        c = close_by_date.get(d)
+        if c is None or c <= 0:
+            continue
+        if prev_c is not None and prev_c > 0:
+            r = float(c) / float(prev_c)
+            if r <= (1.0 - thr) or r >= (1.0 + thr):
+                splits.append({
+                    "date": d,
+                    "ratio": r,
+                    "from_close": float(prev_c),
+                    "to_close": float(c),
+                    "factor_label": _split_label(r),
+                })
+        prev_c = float(c)
+    return splits
+
+
+def _split_label(ratio: float) -> str:
+    """把 0.1 / 10 等 ratio 格式化成 10:1 / 1:10。"""
+    if ratio <= 0:
+        return f"×{ratio:.3g}"
+    if ratio < 1:
+        n = round(1.0 / ratio)
+        if abs(1.0 / ratio - n) < 0.08:
+            return f"{n}:1 拆股"
+    else:
+        n = round(ratio)
+        if abs(ratio - n) < 0.08:
+            return f"1:{n} 合股"
+    return f"×{ratio:.3g}"
+
+
+def _split_factors(dates: list[str], splits: list[dict]) -> dict[str, float]:
+    """每个交易日到「现股口径」的乘子：拆股日前的价格 × factor = 现股等价价。"""
+    split_ratio = {s["date"]: s["ratio"] for s in splits}
+    factors: dict[str, float] = {}
+    running = 1.0
+    for d in reversed(dates):
+        factors[d] = running
+        if d in split_ratio:
+            running *= split_ratio[d]
+    return factors
+
+
 @lru_cache(maxsize=8)
 def _heatmap_cached(symbol: str, latest: str) -> dict:
+    """密度时序热力图。默认按现货跳变把历史复权到现股口径，避免 NVDA 10:1 等拆股把 y 轴撑爆。"""
     c = conn()
     rows = pd.read_sql_query(
         "SELECT i.date, c.grid_json FROM rnd_indicators i"
@@ -219,23 +269,69 @@ def _heatmap_cached(symbol: str, latest: str) -> dict:
         "SELECT DISTINCT date, underlying_close FROM raw_chain WHERE symbol=? ORDER BY date",
         c, params=(symbol,))
     c.close()
+    if rows.empty:
+        return {"dates": [], "prices": [], "cells": [], "close": {}, "splits": [], "adjusted": False}
+
+    dates = rows["date"].tolist()
+    close_raw = dict(zip(closes["date"], closes["underlying_close"].astype(float)))
+    # 只在热力图日期轴上侦测跳变，避免非交易日/缺链干扰
+    close_on_axis = {d: close_raw[d] for d in dates if d in close_raw}
+    splits = _detect_price_splits(dates, close_on_axis)
+    factors = _split_factors(dates, splits)
+
     grids = [json.loads(g) for g in rows["grid_json"]]
-    lo = min(g["strikes"][0] for g in grids)
-    hi = max(g["strikes"][-1] for g in grids)
+    adj_strikes = []
+    adj_density = []
+    for d, g in zip(dates, grids):
+        f = factors.get(d, 1.0)
+        k = np.asarray(g["strikes"], dtype=float) * f
+        dens = np.asarray(g["density"], dtype=float)
+        # K' = f·K 时概率密度需 /f，保持 ∫p dk = 1
+        if f != 0:
+            dens = dens / f
+        adj_strikes.append(k)
+        adj_density.append(dens)
+
+    lo = float(min(k[0] for k in adj_strikes))
+    hi = float(max(k[-1] for k in adj_strikes))
+    # 用复权收盘路径收一收极端翼，避免个别外推点把网格拉稀
+    adj_closes = []
+    for d in dates:
+        c0 = close_raw.get(d)
+        if c0 is not None:
+            adj_closes.append(float(c0) * factors.get(d, 1.0))
+    if adj_closes:
+        c_lo, c_hi = min(adj_closes), max(adj_closes)
+        pad = max((c_hi - c_lo) * 0.35, c_hi * 0.08, 5.0)
+        lo = max(lo, c_lo - pad)
+        hi = min(hi, c_hi + pad)
+        if hi <= lo:
+            lo, hi = c_lo * 0.7, c_hi * 1.3
+
     price_grid = np.linspace(lo, hi, 140)
     Z = np.zeros((len(price_grid), len(grids)))
-    for j, g in enumerate(grids):
-        Z[:, j] = np.interp(price_grid, g["strikes"], g["density"], left=0.0, right=0.0)
+    for j, (k, dens) in enumerate(zip(adj_strikes, adj_density)):
+        Z[:, j] = np.interp(price_grid, k, dens, left=0.0, right=0.0)
+
     # ECharts heatmap 数据格式 [x_idx, y_idx, value]，density 做 0.4 次幂增强低值可见性
     Zp = np.power(np.clip(Z, 0, None), 0.4)
-    Zp = Zp / Zp.max()
+    zmax = float(Zp.max()) if Zp.size else 0.0
+    if zmax > 0:
+        Zp = Zp / zmax
     data = [[j, i, round(float(Zp[i, j]), 4)]
             for j in range(Z.shape[1]) for i in range(Z.shape[0]) if Zp[i, j] > 0.01]
+
+    close_adj = {
+        d: round(float(close_raw[d]) * factors.get(d, 1.0), 4)
+        for d in close_raw
+    }
     return {
-        "dates": rows["date"].tolist(),
+        "dates": dates,
         "prices": [round(float(p), 1) for p in price_grid],
         "cells": data,
-        "close": dict(zip(closes["date"], closes["underlying_close"].astype(float))),
+        "close": close_adj,
+        "splits": splits,
+        "adjusted": bool(splits),
     }
 
 
