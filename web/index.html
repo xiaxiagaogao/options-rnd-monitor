@@ -268,11 +268,12 @@
                class="tile" :class="{off: s.pct==null}"
                @click="s.pct==null && openDiagnostics()">
             <div class="row"><span class="tname">{{ s.label }}</span>
-              <span class="tvs" :class="{hot: s.bench_pct>=90 || s.bench_pct<=10}">
-                {{ detail.benchmark }} {{ s.bench_pct!=null ? 'P'+Math.round(s.bench_pct) : '—' }}</span></div>
+              <span class="tvs" :class="{hot: s.bench_pct>=90 || s.bench_pct<=10}"
+                   :title="'对照标的 ' + detail.benchmark + ' 的同指标分位（非当前标的）'">
+                对照 {{ detail.benchmark }} {{ s.bench_pct!=null ? 'P'+Math.round(s.bench_pct) : '—' }}</span></div>
             <div class="row">
               <span class="tval">{{ fmtIndicator(s.indicator, s.value) }}</span>
-              <span class="tpct" v-if="s.pct!=null">P{{ Math.round(s.pct) }}
+              <span class="tpct" v-if="s.pct!=null"><span class="annot" style="margin-right:4px">{{ detail.symbol }}</span>P{{ Math.round(s.pct) }}
                 <span class="tdelta">Δ{{ s.dpct!=null ? (s.dpct>0?'+':'')+s.dpct.toFixed(1) : '—' }}</span></span>
               <span class="tpct muted" v-else>静默</span>
             </div>
