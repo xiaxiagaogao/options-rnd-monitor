@@ -35,15 +35,15 @@ def run(symbols: list[str] | None = None, *, do_digest: bool = True, dry: bool =
     else:
         print("--- 异动 --- 无")
 
-    # 2. 综合摘要（Fable max，1–3 分钟）
+    # 2. 全量市场展望（C++ outlook，Fable max，1–3 分钟）——每日汇报复用此模式
     if do_digest:
-        msg, asof = assistant.build_digest_messages(syms)
+        msg, asof = assistant.build_outlook_messages(syms)
         # 模型按模板自带标题+口径日期，不再叠加脚本头，避免双标题。
-        digest = assistant.generate(msg["system"], msg["user"])
-        print("--- 摘要 ---\n" + digest)
+        outlook = assistant.generate(msg["system"], msg["user"])
+        print("--- 市场展望 ---\n" + outlook)
         if not dry:
-            telegram.send(digest)
-        sent.append("摘要")
+            telegram.send(outlook)
+        sent.append("市场展望")
 
     return sent
 

@@ -104,6 +104,43 @@ def build_digest_messages(symbols: list[str]) -> tuple[dict, str | None]:
     return {"system": SYSTEM_PROMPT, "user": user}, asof
 
 
+def build_outlook_messages(symbols: list[str]) -> tuple[dict, str | None]:
+    """全量市场展望（C++ 决断度；2026-07-22 两版原型人工锁定）。
+
+    比 digest 更进一步：板块基调总纲 + 每标的精悍净判断 + 对已有持仓论点的顺逆风判定
+    + 情景触发。红线焊死——描述定价环境偏向可以，给买卖/加减/对冲/仓位动作不行、不预测涨跌。
+    复用九纪律 SYSTEM_PROMPT。返回 (messages, asof)。
+    """
+    packs = {s: build_context(s) for s in symbols}
+    asof = next((p["meta"]["asof"] for p in packs.values() if p["meta"].get("asof")), None)
+    body = json.dumps(packs, ensure_ascii=False, indent=2, default=str)
+    user = (
+        f"以下是 {', '.join(symbols)} 在数据日 {asof} 的结构化上下文包"
+        f"（唯一数值来源，禁止另算）：\n\n```json\n{body}\n```\n\n"
+        "任务：出一版**市场展望（market outlook）**，C++ 决断度——够狠、有净判断，但不下单。"
+        "别复述面板数字，你的价值是综合与解读。\n\n"
+        "【开篇总纲（1-2 句）】\n"
+        "先给一句**板块基调**：把标的按板块归拢（宽基 / 科技·纳指 / 半导体 等），"
+        "一句点出今天市场是什么定价基调、担忧集中在哪个层级。像一句能转发的头条，有态度。\n\n"
+        "【每标的：3-4 行，精悍别啰嗦】\n"
+        "- **净判断（狠、决断）**：定价环境是什么性质，且在往哪走（升级/恶化/缓和/转向/维持）"
+        "——不要「偏X」的温吞，要「X，且在Y」。\n"
+        "- 支撑：只挑 1-2 个最有信息量的读数论证（点名不对称、跨指数对照、日环比），别铺全指标。\n"
+        "- **情景触发**：一条「若…则…」。\n"
+        "- 有持仓的标的：这套定价对你的论点是**逆风 / 顺风 / 中性**（挂失效线、偏移）"
+        "——判定顺逆风可以，给动作不行。\n\n"
+        "【红线——展望不是指令】\n"
+        "- 允许：决断的环境净判断、点名不对称、情景触发、**对已有论点/持仓的顺逆风判定**"
+        "（如「这对多头是逆风」）。\n"
+        "- 禁止：买/卖/加/减/对冲/开平仓/仓位大小 的动作；预测涨跌点位或概率。"
+        "「环境对你论点是逆风」能说，「所以你该减仓」不能说——那个键用户自己按。**不下单。**\n"
+        "- 守纪律：RN≠真实（偏向是「市场在这么定价」，非「真会这样」）；闸门 FAIL 静默；"
+        "样本<60 不报分位；逐分位 in_range=False 降级披露。\n\n"
+        "【形式】纯文本、精悍有节奏；开篇总纲 + 每标的 3-4 行；末尾一行免责。整体短而狠。"
+    )
+    return {"system": SYSTEM_PROMPT, "user": user}, asof
+
+
 def generate(system: str, user: str, *, max_tokens: int = 16000) -> str:
     """单次请求（framework §4）：装配好的提示 → LLM → 文本。这是唯一的模型接缝。
 

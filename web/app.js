@@ -91,6 +91,9 @@ createApp({
     // 研究助手
     asSymbol: "SPY", asQuestion: "", asBusy: false, asErr: "",
     asElapsed: 0, asTimer: null, qa: [], asExpanded: {},
+    // 全量市场展望
+    outlook: null, outlookBusy: false, outlookErr: "",
+    outlookElapsed: 0, outlookTimer: null, outlookAsof: null, outlookSecs: null,
     presets: ["现在偏度和尾部在什么水平？", "我这笔持仓要注意什么？",
               "和指数并排有什么异常？", "今天闸门/拟合质量可信吗？"],
   }),
@@ -202,6 +205,25 @@ createApp({
       if (el) el.scrollTop = el.scrollHeight;
     },
     toggleContext(i) { this.asExpanded[i] = !this.asExpanded[i]; },
+    async runOutlook() {
+      if (this.outlookBusy) return;
+      this.outlookErr = "";
+      this.outlookBusy = true;
+      this.outlookElapsed = 0;
+      this.outlookTimer = setInterval(() => { this.outlookElapsed += 1; }, 1000);
+      try {
+        const r = await api("/api/assistant/outlook", { method: "POST" });
+        this.outlook = r.answer;
+        this.outlookAsof = r.asof;
+        this.outlookSecs = this.outlookElapsed;
+      } catch (e) {
+        if (e.auth) this.view = "login";
+        else this.outlookErr = e.detail || "生成失败";
+      } finally {
+        clearInterval(this.outlookTimer);
+        this.outlookBusy = false;
+      }
+    },
     fmtIndicator(name, v) {
       if (v == null) return "—";
       if (PCT_INDICATORS.has(name)) return (v * 100).toFixed(1) + "%";

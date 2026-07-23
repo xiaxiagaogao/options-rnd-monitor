@@ -168,6 +168,23 @@ def assistant(payload: dict = Body(...)):
     return {"symbol": symbol, "asof": ctx["meta"]["asof"], "answer": answer, "context": ctx}
 
 
+@app.post("/api/assistant/outlook", dependencies=[Depends(require_auth)])
+def assistant_outlook():
+    """全量市场展望（C++）：对所有自选标的出一版有净判断的 outlook（framework §2.3 精神）。"""
+    from . import assistant as asst
+    syms = q.get_symbols()
+    msg, asof = asst.build_outlook_messages(syms)
+    if not asof:
+        raise HTTPException(404, "无可用数据")
+    try:
+        answer = asst.generate(msg["system"], msg["user"])
+    except asst.AssistantNotConfigured as e:
+        raise HTTPException(503, str(e))
+    except asst.AssistantError as e:
+        raise HTTPException(502, str(e))
+    return {"symbols": syms, "asof": asof, "answer": answer}
+
+
 app.mount("/vendor", StaticFiles(directory=WEB / "vendor"), name="vendor")
 
 

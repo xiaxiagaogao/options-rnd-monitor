@@ -180,6 +180,9 @@ body {
   font-size: 13.5px; font-weight: 600; cursor: pointer; white-space: nowrap; align-self: stretch; }
 .ask-send:disabled { opacity: .45; cursor: default; }
 .ask-disc { text-align: center; }
+.outlook-card { border-top: 3px solid #7FB8A4; }
+.outlook-card .md { margin-top: 6px; }
+.outlook-card .card-title .annot { font-weight: 400; margin-left: 4px; }
 
 /* markdown 渲染 */
 .md { font-size: 13.5px; line-height: 1.75; color: #26241F; }
