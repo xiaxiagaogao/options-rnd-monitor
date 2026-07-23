@@ -25,86 +25,80 @@
     </div>
   </div>
 
-  <!-- ===== 仪表盘 ===== -->
-  <div v-if="view==='dash'" class="page">
+  <!-- ===== 应用壳：侧栏三入口 今日 / 标的 / 助手 ===== -->
+  <div v-if="isApp" class="page" :class="{ 'asst-page': view==='assistant' }">
 
     <header class="topbar">
       <div class="brand">
-        <span class="brand-name">RND 仪表盘</span>
-        <span class="tag" v-if="detail">数据 {{ detail.date }} 收盘</span>
+        <span class="brand-name">RND</span>
+        <span class="tag" v-if="dataDate">数据 {{ dataDate }} 收盘</span>
+        <span class="tag" v-if="view==='assistant'">Fable 5 · 数据描述非建议</span>
       </div>
       <div class="topbar-right">
-        <button v-for="s in symbols" :key="s"
-                class="pill" :class="{on: s===active}" @click="switchSymbol(s)">{{ s }}</button>
-        <span class="spacer"></span>
-        <template v-if="detail">
-          <span v-for="e in detail.expiries" :key="e.expiry"
-                class="chip" :class="{on: e.pinned===1}">
-            {{ e.pinned===1 ? '★ ' : '' }}{{ e.expiry.slice(5) }} · DTE {{ e.dte }}{{ e.pinned===1 ? '（钉）' : '' }}
-          </span>
-        </template>
         <button class="chip ghost" @click="doLogout">退出</button>
       </div>
     </header>
 
-    <div class="strip" v-if="loadingSym && !detail">
-      <span class="seg strong">{{ active }} 加载中…</span>
-      <span class="seg faint">切换标的，等待数据对齐</span>
-    </div>
-    <div class="strip" v-if="detail && ind">
-      <span class="seg strong">{{ detail.date }} 收盘</span>
-      <span class="seg">{{ detail.symbol || active }} · 钉 {{ ind.expiry.slice(5) }}（DTE {{ ind.dte }}）</span>
-      <span class="seg">F <b>{{ fmt(ind.forward,1) }}</b></span>
-      <span class="seg">±1σ <b>±{{ fmt(ind.sigma1_abs,1) }}</b>（±{{ fmt(ind.sigma1_pct*100,1) }}%）</span>
-      <span class="seg"><span class="lamp" :class="ind.gate_pass ? 'ok':'bad'"></span>
-        闸门 {{ ind.gate_pass ? 'PASS' : 'FAIL' }}</span>
-      <span class="seg">{{ ind.n_modes>=2 ? '双峰 ◆' : '单峰' }}</span>
-      <span class="seg" v-if="myPosition">持仓 · 冻结 {{ myPosition.stop_q.toUpperCase() }}
-        {{ fmt(frozenStop,1) }} · 偏移 <b>{{ offsetSigma }}</b></span>
-      <span class="seg" v-else>无持仓</span>
-      <span class="seg faint">EOD · 次日 07:00 JST 更新</span>
-    </div>
-
+    <!-- 顶栏下方布局固定：状态条不再插入此处，避免切页整栏跳动 -->
     <div class="layout">
-
-      <!-- 左栏 · 驾驶舱 -->
       <aside class="sidebar">
-        <div class="zone-tag">驾驶舱 · 今天哪个标的有事</div>
-        <div v-for="o in overview" :key="o.symbol"
-             class="sym" :class="{on: o.symbol===active}" @click="switchSymbol(o.symbol)">
-          <div class="row">
-            <span class="sym-name">{{ o.symbol }}</span>
-            <span v-if="o.ready" class="gate-mini">
-              <span class="lamp" :class="o.gate_pass ? 'ok':'bad'"></span>
-              {{ o.gate_pass ? 'PASS' : 'FAIL' }}</span>
-          </div>
-          <div class="badges" v-if="o.ready">
-            <span class="badge" v-if="o.atm_iv_pct!=null">IV P{{ Math.round(o.atm_iv_pct) }}</span>
-            <span class="badge warn" v-for="x in o.extremes.slice(0,2)" :key="x.indicator">
-              ⚠ {{ x.label }} P{{ Math.round(x.pct) }}</span>
-            <span class="badge" v-if="o.n_modes>=2">◆ 双峰</span>
-            <span class="badge" v-if="o.positions">● 持仓 {{ o.positions }}</span>
-          </div>
-          <div class="annot">{{ o.ready ? (o.extremes.length ? '有极端分位 · 点开看' : '无极端分位 · 平静') : '数据未就绪' }}</div>
-        </div>
+        <nav class="side-nav" aria-label="主导航">
+          <button type="button" class="side-nav-item" :class="{ on: view==='today' }" @click="goToday">
+            <span class="side-nav-title">今日</span>
+            <span class="side-nav-sub">总览 · 扫盘</span>
+          </button>
+          <button type="button" class="side-nav-item" :class="{ on: view==='symbol' }" @click="goSymbol()">
+            <span class="side-nav-title">标的</span>
+            <span class="side-nav-sub">{{ active || '深页' }}</span>
+          </button>
+          <button type="button" class="side-nav-item" :class="{ on: view==='assistant' }" @click="goAssistant">
+            <span class="side-nav-title">✳ 研究助手</span>
+            <span class="side-nav-sub">问答 · 展望</span>
+          </button>
+        </nav>
 
-        <div class="card asst-entry" @click="goAssistant">
-          <div class="row"><span style="font-size:14px">✳</span>
-            <span class="card-title">研究助手</span><span class="annot">问答 · 每日汇报 →</span></div>
-          <div class="annot" style="margin-top:4px">只读本地五表 · 输出为数据描述非建议</div>
-        </div>
-
-        <div class="card">
-          <div class="row card-head"><span class="card-title">事件流</span>
-            <span class="annot">与图上标记同源</span></div>
-          <div v-for="(e,i) in events" :key="i" class="evitem" @click="switchSymbol(e.symbol)">
-            <span class="evdate">{{ e.date.slice(5) }}</span>
-            <span class="evglyph">{{ e.glyph }}</span>
-            <span>{{ e.symbol }} {{ e.text }}</span>
+        <div class="side-ctx" :class="{ 'is-fading': uiFading }">
+        <!-- 上下文：今日 -->
+        <template v-if="view==='today'">
+          <div class="zone-tag">池内快览</div>
+          <div v-for="o in overview" :key="'t-'+o.symbol"
+               class="sym" @click="goSymbol(o.symbol)">
+            <div class="row">
+              <span class="sym-name">{{ o.symbol }}</span>
+              <span v-if="o.ready" class="gate-mini">
+                <span class="lamp" :class="o.gate_pass ? 'ok':'bad'"></span>
+                {{ o.gate_pass ? 'PASS' : 'FAIL' }}</span>
+            </div>
+            <div class="badges" v-if="o.ready">
+              <span class="badge" v-if="o.atm_iv_pct!=null">IV P{{ Math.round(o.atm_iv_pct) }}</span>
+              <span class="badge warn" v-for="x in o.extremes.slice(0,2)" :key="x.indicator">
+                ⚠ {{ x.label }} P{{ Math.round(x.pct) }}</span>
+              <span class="badge" v-if="o.positions">● 持仓 {{ o.positions }}</span>
+            </div>
+            <div class="annot">{{ o.ready ? (o.extremes.length ? '有极端 · 点进标的' : '平静') : '未就绪' }}</div>
           </div>
-          <div v-if="!events.length" class="annot" style="padding:8px 0">近 90 日无事件</div>
-        </div>
+        </template>
 
+        <!-- 上下文：标的 -->
+        <template v-if="view==='symbol'">
+          <div class="zone-tag">标的 · 点击切换</div>
+          <div v-for="o in overview" :key="'s-'+o.symbol"
+               class="sym" :class="{ on: o.symbol===active }" @click="switchSymbol(o.symbol)">
+            <div class="row">
+              <span class="sym-name">{{ o.symbol }}</span>
+              <span v-if="o.ready" class="gate-mini">
+                <span class="lamp" :class="o.gate_pass ? 'ok':'bad'"></span>
+                {{ o.gate_pass ? 'PASS' : 'FAIL' }}</span>
+            </div>
+            <div class="badges" v-if="o.ready">
+              <span class="badge" v-if="o.atm_iv_pct!=null">IV P{{ Math.round(o.atm_iv_pct) }}</span>
+              <span class="badge warn" v-for="x in o.extremes.slice(0,2)" :key="x.indicator">
+                ⚠ {{ x.label }} P{{ Math.round(x.pct) }}</span>
+              <span class="badge" v-if="o.n_modes>=2">◆ 双峰</span>
+              <span class="badge" v-if="o.positions">● 持仓 {{ o.positions }}</span>
+            </div>
+            <div class="annot">{{ o.ready ? (o.extremes.length ? '有极端分位 · 点开看' : '无极端分位 · 平静') : '数据未就绪' }}</div>
+          </div>
         <div class="card">
           <div class="row card-head"><span class="card-title">添加标的</span>
             <span class="annot">动态槽 {{ poolStatus.slots || '—' }}</span></div>
@@ -143,10 +137,119 @@
           <div class="login-err" v-if="admErr">{{ admErr }}</div>
         </div>
 
+        </template>
+
+        <!-- 上下文：助手 -->
+        <template v-if="view==='assistant'">
+          <div class="zone-tag">问答标的</div>
+          <div v-for="s in symbols" :key="'a-'+s"
+               class="sym" :class="{ on: s===asSymbol }" @click="asSymbol=s">
+            <div class="row"><span class="sym-name">{{ s }}</span></div>
+            <div class="annot">{{ asAsof && s===asSymbol ? ('数据日 '+asAsof) : '点选后提问' }}</div>
+          </div>
+        </template>
+        </div>
       </aside>
 
-      <!-- 主区 -->
-      <main class="main">
+      <div class="main-col" :class="{ 'is-fading': uiFading }">
+        <!-- ===== 今日总览 ===== -->
+        <main v-if="view==='today'" class="main">
+          <div class="zone"><span class="zone-tag">今日 · 总览</span>
+            <span class="annot">今天哪个标的有事 · 点卡片进深页</span></div>
+
+          <div class="home-grid">
+            <div v-for="o in overview" :key="'card-'+o.symbol"
+                 class="card pad home-sym" :class="{ hot: o.ready && o.extremes && o.extremes.length }"
+                 @click="goSymbol(o.symbol)">
+              <div class="row">
+                <span class="card-title" style="font-size:18px">{{ o.symbol }}</span>
+                <span v-if="o.ready" class="gate-mini">
+                  <span class="lamp" :class="o.gate_pass ? 'ok':'bad'"></span>
+                  {{ o.gate_pass ? 'PASS' : 'FAIL' }}</span>
+                <span v-else class="badge">未就绪</span>
+              </div>
+              <div class="badges" style="margin-top:8px" v-if="o.ready">
+                <span class="badge" v-if="o.atm_iv_pct!=null">IV P{{ Math.round(o.atm_iv_pct) }}</span>
+                <span class="badge" v-if="o.n_modes>=2">◆ 双峰</span>
+                <span class="badge" v-if="o.positions">● journal 持仓 {{ o.positions }}</span>
+                <span class="badge warn" v-for="x in (o.extremes||[]).slice(0,3)" :key="x.indicator">
+                  ⚠ {{ x.label }} P{{ Math.round(x.pct) }}</span>
+              </div>
+              <div class="annot" style="margin-top:10px">
+                {{ o.ready ? (o.date ? ('数据日 '+o.date+' · ') : '') + (o.extremes && o.extremes.length ? '有极端分位' : '无极端 · 平静') : '链/指标未就绪' }}
+                <span style="float:right">进标的 →</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid-21" style="margin-top:4px">
+            <div class="card pad">
+              <div class="row card-head"><span class="card-title">事件流</span>
+                <span class="annot">近 90 日 · 与图标记同源</span></div>
+              <div v-for="(e,i) in events" :key="'me'+i" class="evitem" @click="goSymbol(e.symbol)">
+                <span class="evdate">{{ e.date.slice(5) }}</span>
+                <span class="evglyph">{{ e.glyph }}</span>
+                <span>{{ e.symbol }} {{ e.text }}</span>
+              </div>
+              <div v-if="!events.length" class="annot" style="padding:8px 0">近 90 日无事件</div>
+            </div>
+            <div class="card pad">
+              <div class="row card-head"><span class="card-title">持仓摘要</span>
+                <span class="annot">journal 手动轨 · 非券商实时</span></div>
+              <template v-if="positionedSymbols.length">
+                <div v-for="o in positionedSymbols" :key="'pos-'+o.symbol" class="qrow"
+                     style="cursor:pointer" @click="goSymbol(o.symbol)">
+                  <span class="muted">{{ o.symbol }}</span>
+                  <span class="qv">● {{ o.positions }} 笔 · 点进标的看冻结线</span>
+                </div>
+              </template>
+              <div v-else class="annot" style="padding:12px 0">
+                当前池内无 journal 持仓。录入在「标的」页右侧；未来可并入券商实时轨（见 design-decisions）。
+              </div>
+              <div class="annot" style="margin-top:12px;border-top:1px dashed #E4E1D9;padding-top:8px">
+                RND 池 {{ symbols.length }} 只（固定3+动态2）· 池外持仓不同步算图
+              </div>
+            </div>
+          </div>
+
+          <footer class="foot">
+            今日页只做扫盘：闸门 / 极端分位 / 事件 / journal 持仓标记。深图与状态条在「标的」页。
+            数据描述，不构成投资建议。
+          </footer>
+        </main>
+
+        <!-- ===== 标的深页 ===== -->
+      <main class="main" v-show="view==='symbol'">
+
+        <!-- 标的上下文：状态条 + 到期，仅主区变化，侧栏/顶栏高度稳定 -->
+        <div class="sym-chrome">
+          <div class="strip strip-embed" v-if="loadingSym && !detail">
+            <span class="seg strong">{{ active }} 加载中…</span>
+            <span class="seg faint">切换标的，等待数据对齐</span>
+          </div>
+          <div class="strip strip-embed" v-else-if="detail && ind">
+            <span class="seg strong">{{ detail.date }} 收盘</span>
+            <span class="seg">{{ detail.symbol || active }} · 钉 {{ ind.expiry.slice(5) }}（DTE {{ ind.dte }}）</span>
+            <span class="seg">F <b>{{ fmt(ind.forward,1) }}</b></span>
+            <span class="seg">±1σ <b>±{{ fmt(ind.sigma1_abs,1) }}</b>（±{{ fmt(ind.sigma1_pct*100,1) }}%）</span>
+            <span class="seg"><span class="lamp" :class="ind.gate_pass ? 'ok':'bad'"></span>
+              闸门 {{ ind.gate_pass ? 'PASS' : 'FAIL' }}</span>
+            <span class="seg">{{ ind.n_modes>=2 ? '双峰 ◆' : '单峰' }}</span>
+            <span class="seg" v-if="myPosition">持仓 · 冻结 {{ myPosition.stop_q.toUpperCase() }}
+              {{ fmt(frozenStop,1) }} · 偏移 <b>{{ offsetSigma }}</b></span>
+            <span class="seg" v-else>无持仓</span>
+            <span class="seg faint">EOD · 次日 07:00 JST 更新</span>
+          </div>
+          <div class="strip strip-embed strip-ph" v-else>
+            <span class="seg faint">标的上下文加载中…</span>
+          </div>
+          <div class="expiry-row" v-if="detail">
+            <span v-for="e in detail.expiries" :key="e.expiry"
+                  class="chip" :class="{ on: e.pinned===1 }">
+              {{ e.pinned===1 ? '★ ' : '' }}{{ e.expiry.slice(5) }} · DTE {{ e.dte }}{{ e.pinned===1 ? '（钉）' : '' }}
+            </span>
+          </div>
+        </div>
 
         <div class="zone"><span class="zone-tag">罗盘 · 持仓诊断</span>
           <span class="annot">回答：我的持仓理由现在怎么样了</span></div>
@@ -387,27 +490,9 @@
           数据口径：ThetaData EOD · IV 自算 · SOFR 贴现 · 仅月度期权 · 钉 30 DTE + roll 打标 · 数据描述，不构成投资建议
         </footer>
       </main>
-    </div>
-  </div>
 
-  <!-- ===== 研究助手 ===== -->
-  <div v-if="view==='assistant'" class="page asst-page">
-    <header class="topbar">
-      <div class="brand">
-        <button class="chip ghost" @click="backToDash">← 仪表盘</button>
-        <span class="brand-name">研究助手</span>
-        <span class="tag">Fable 5 · 数据描述非建议</span>
-      </div>
-      <div class="topbar-right">
-        <span class="annot">标的</span>
-        <button v-for="s in symbols" :key="s" class="pill" :class="{on: s===asSymbol}"
-                @click="asSymbol=s">{{ s }}</button>
-        <span class="spacer"></span>
-        <span class="chip">数据日 {{ asAsof || '—' }}</span>
-        <button class="chip ghost" @click="doLogout">退出</button>
-      </div>
-    </header>
-
+        <!-- ===== 研究助手 ===== -->
+        <main v-if="view==='assistant'" class="main asst-main">
     <div class="asst-wrap">
       <div class="card outlook-card">
         <div class="row card-head">
@@ -464,6 +549,9 @@
       </div>
       <div class="ask-disc annot">
         RN ≠ 真实概率（尾部含保费）· 分位线只做收盘确认失效线，非盘中止损 · 本页不含方向观点 · 数据描述，不构成投资建议
+      </div>
+    </div>
+        </main>
       </div>
     </div>
   </div>

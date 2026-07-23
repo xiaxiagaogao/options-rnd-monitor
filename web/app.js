@@ -81,7 +81,7 @@ createApp({
     active: "SPY", detail: null, fanData: null, fanDays: 120,
     densityData: { ok: false }, heatData: null,
     dcdfData: { ok: false }, pitData: { ok: false },
-    switchSeq: 0, loadingSym: false,
+    switchSeq: 0, loadingSym: false, uiFading: false,
     admSymbol: "", admBusy: false, admResult: null, admPool: [], admErr: "",
     poolStatus: {}, poolTimer: null,
     cmpMode: "prev", cmpLabel: "",
@@ -100,6 +100,15 @@ createApp({
               "和指数并排有什么异常？", "今天闸门/拟合质量可信吗？"],
   }),
   computed: {
+    isApp() { return ["today", "symbol", "assistant"].includes(this.view); },
+    dataDate() {
+      if (this.detail && this.detail.date) return this.detail.date;
+      const r = this.overview.find(o => o.ready && o.date);
+      return r ? r.date : null;
+    },
+    positionedSymbols() {
+      return this.overview.filter(o => o.positions);
+    },
     ind() { return this.detail ? this.detail.indicators : null; },
     myPosition() {
       return this.detail && this.detail.positions.length ? this.detail.positions[0] : null;
@@ -163,15 +172,81 @@ createApp({
     fmt(v, n = 2) { return v == null ? "—" : Number(v).toFixed(n); },
     md(text) { return renderMarkdown(text); },
     // ---------- 研究助手 ----------
+    // ---------- 侧栏三入口：今日 / 标的 / 助手 ----------
+    pathFor(view, sym) {
+      if (view === "assistant") return "/assistant";
+      if (view === "symbol") return `/sym/${encodeURIComponent(sym || this.active || "SPY")}`;
+      return "/";
+    },
+    sleep(ms) { return new Promise(r => setTimeout(r, ms)); },
+    /** 侧栏切页：先淡出再换视图再淡入，避免硬切 */
+    async withPaneTransition(changeFn, { animate = true } = {}) {
+      if (!animate || this.uiFading) {
+        await changeFn();
+        return;
+      }
+      this.uiFading = true;
+      await this.sleep(150);
+      try {
+        await changeFn();
+        await this.$nextTick();
+      } finally {
+        await this.sleep(20);
+        this.uiFading = false;
+        await this.$nextTick();
+        if (this.view === "symbol") {
+          Object.values(this.charts).forEach(c => c && c.resize());
+        }
+      }
+    },
+    goToday() {
+      return this.withPaneTransition(async () => {
+        if (this.view !== "today") history.pushState({ view: "today" }, "", "/");
+        this.view = "today";
+      }, { animate: this.view !== "today" });
+    },
+    async goSymbol(sym) {
+      const s = (sym || this.active || (this.symbols[0] || "SPY")).toUpperCase();
+      const path = this.pathFor("symbol", s);
+      const leaving = this.view !== "symbol";
+      const needLoad = s !== this.active || !this.detail;
+      // 切页只过渡壳；数据加载放在淡入后，避免长时间停在空白淡出态
+      await this.withPaneTransition(async () => {
+        if (location.pathname !== path || leaving) {
+          history.pushState({ view: "symbol", sym: s }, "", path);
+        }
+        this.view = "symbol";
+      }, { animate: leaving });
+      if (needLoad) await this.switchSymbol(s);
+      else this.$nextTick(() => Object.values(this.charts).forEach(c => c && c.resize()));
+    },
     goAssistant() {
       this.asSymbol = this.active || this.asSymbol;
-      history.pushState({ view: "assistant" }, "", "/assistant");
-      this.view = "assistant";
+      return this.withPaneTransition(async () => {
+        if (this.view !== "assistant") {
+          history.pushState({ view: "assistant" }, "", "/assistant");
+        }
+        this.view = "assistant";
+      }, { animate: this.view !== "assistant" });
     },
-    backToDash() {
-      history.pushState({ view: "dash" }, "", "/");
-      this.view = "dash";
-      this.$nextTick(() => Object.values(this.charts).forEach(c => c && c.resize()));
+    backToDash() { return this.goSymbol(this.active); },
+    async routeFromLocation() {
+      // 首屏 / 浏览器前进后退：瞬时切换，不叠过渡
+      const path = location.pathname || "/";
+      if (path.startsWith("/assistant")) {
+        this.asSymbol = this.active || this.asSymbol;
+        this.view = "assistant";
+        return;
+      }
+      const m = path.match(/^\/sym(?:\/([^/]+))?\/?$/);
+      if (m) {
+        const s = decodeURIComponent(m[1] || this.active || this.symbols[0] || "SPY").toUpperCase();
+        this.view = "symbol";
+        if (s !== this.active || !this.detail) await this.switchSymbol(s);
+        else this.$nextTick(() => Object.values(this.charts).forEach(c => c && c.resize()));
+        return;
+      }
+      this.view = "today";
     },
     presetAsk(q) { this.asQuestion = q; this.askAssistant(); },
     async askAssistant() {
@@ -253,21 +328,26 @@ createApp({
         const ov = await api("/api/overview");
         this.overview = ov.symbols;
         this.symbols = ov.symbols.map(o => o.symbol);
-        this.view = "dash";
         const ready = ov.symbols.find(o => o.ready);
-        await this.switchSymbol(ready ? ready.symbol : this.symbols[0]);
+        this.active = (ready ? ready.symbol : this.symbols[0]) || "SPY";
         this.events = (await api("/api/events")).events.slice(0, 12);
         this.refreshPool();
-        if (location.pathname === "/assistant") { this.asSymbol = this.active; this.view = "assistant"; }
+        // 按 URL 分流：/ → 今日总览；/sym/:code → 深页；/assistant → 助手
+        await this.routeFromLocation();
       } catch (e) {
         if (e.auth) this.view = "login"; else throw e;
       }
     },
     async switchSymbol(sym) {
       if (!sym) return;
+      sym = String(sym).toUpperCase();
       // 序号令牌：丢弃过期的并发切换结果，防止 active=NVDA 却写入 QQQ 数据
       const seq = ++this.switchSeq;
       this.active = sym;
+      if (this.view === "symbol") {
+        const path = this.pathFor("symbol", sym);
+        if (location.pathname !== path) history.replaceState({ view: "symbol", sym }, "", path);
+      }
       this.loadingSym = true;
       this.diagMeta = null;
       // 立刻清空旧标的数据，避免标签已切走但数值/图仍显示上一个标的
@@ -629,8 +709,7 @@ createApp({
     });
     window.addEventListener("popstate", () => {
       if (this.view === "login" || this.view === "boot") return;
-      if (location.pathname === "/assistant") { this.view = "assistant"; }
-      else { this.view = "dash"; this.$nextTick(() => Object.values(this.charts).forEach(c => c && c.resize())); }
+      this.routeFromLocation();
     });
   },
 }).mount("#app");
