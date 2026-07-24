@@ -28,6 +28,36 @@ def map_symbol(binance_symbol: str) -> str | None:
     s = binance_symbol.upper()
     if s in SYMBOL_BLACKLIST:
         return None
-    if not s.endswith("USDT"):
+    if not s.endswith("USDT") or len(s) <= 4:
         return None
     return s[:-4]
+
+
+def derive_current_holdings(fund_db_path: str | Path = FUND_DB_PATH) -> set[str]:
+    """读 fund.db binance_fills，按 (symbol,position_side) derive 净持仓。
+    对齐基金 positions/derive.go：BUY +qty / SELL -qty，abs > 1e-9 判持有。
+    库不存在（本机开发）→ 空集合。绝不写库。"""
+    p = Path(fund_db_path)
+    if not p.exists():
+        return set()
+    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT symbol, position_side, side, qty FROM binance_fills").fetchall()
+    finally:
+        conn.close()
+    net: dict[tuple, float] = {}
+    for symbol, pos_side, side, qty in rows:
+        signed = qty if side == "BUY" else -qty
+        key = (symbol, pos_side)
+        net[key] = net.get(key, 0.0) + signed
+    return {sym for (sym, _), n in net.items() if abs(n) > HELD_EPS}
+
+
+def resolve_holdings(fund_db_path: str | Path = FUND_DB_PATH) -> tuple[set[str], set[str]]:
+    """derive + map。返回 (可映射美股 ticker 集合, 被排除的原始 binance symbol 集合)。"""
+    mapped, excluded = set(), set()
+    for bsym in derive_current_holdings(fund_db_path):
+        t = map_symbol(bsym)
+        (excluded.add(bsym) if t is None else mapped.add(t))
+    return mapped, excluded

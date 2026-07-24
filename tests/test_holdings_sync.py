@@ -54,6 +54,41 @@ check("SAMSUNGUSDT 黑名单→None", hs.map_symbol("SAMSUNGUSDT") is None)
 check("BZUSDT 布伦特→None（非美股 BZ）", hs.map_symbol("BZUSDT") is None)
 check("XAUUSDT 商品→None", hs.map_symbol("XAUUSDT") is None)
 check("非 USDT 结尾→None", hs.map_symbol("NVDABUSD") is None)
+check("USDT 单独→None", hs.map_symbol("USDT") is None)
+check("空串→None", hs.map_symbol("") is None)
+
+
+# === 3. derive_current_holdings + resolve_holdings ===
+def _make_fund_db(fills) -> Path:
+    """fills: list of (symbol, position_side, side, qty)。返回临时 fund.db 路径。"""
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    f.close()
+    conn = sqlite3.connect(f.name)
+    conn.execute("CREATE TABLE binance_fills "
+                 "(symbol TEXT, position_side TEXT, side TEXT, qty REAL)")
+    conn.executemany("INSERT INTO binance_fills VALUES (?,?,?,?)", fills)
+    conn.commit()
+    conn.close()
+    return Path(f.name)
+
+db_hold = _make_fund_db([
+    ("NVDAUSDT", "LONG", "BUY", 1.0), ("NVDAUSDT", "LONG", "BUY", 0.2),   # net 1.2 持有
+    ("INTCUSDT", "LONG", "BUY", 0.5), ("INTCUSDT", "LONG", "SELL", 0.5),  # net 0 已平
+    ("GOOGLUSDT", "LONG", "BUY", 0.26),                                    # 持有
+    ("TSLAUSDT", "LONG", "BUY", 1.0), ("TSLAUSDT", "SHORT", "SELL", 1.0),  # 对冲两腿都持有
+    ("SAMSUNGUSDT", "LONG", "BUY", 0.24),                                  # 持有但黑名单
+])
+held = hs.derive_current_holdings(db_hold)
+check("净持仓集合", held == {"NVDAUSDT", "GOOGLUSDT", "TSLAUSDT", "SAMSUNGUSDT"},
+      f"{held}")
+check("已平仓不计（INTC）", "INTCUSDT" not in held)
+check("对冲不抵消（TSLA 两腿）", "TSLAUSDT" in held)
+
+check("本机无 fund.db → 空集", hs.derive_current_holdings("/nonexistent/fund.db") == set())
+
+mapped, excluded = hs.resolve_holdings(db_hold)
+check("resolve 映射美股", mapped == {"NVDA", "GOOGL", "TSLA"}, f"{mapped}")
+check("resolve 排除黑名单", excluded == {"SAMSUNGUSDT"}, f"{excluded}")
 
 
 # === 末尾判定 ===
