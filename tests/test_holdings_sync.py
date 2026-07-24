@@ -44,6 +44,18 @@ check("effective 去重并集", set(eff) == {"SPY", "QQQ", "AAPL", "MU", "NVDA"}
 check("effective 无重复", len(eff) == len(set(eff)), f"{eff}")
 
 
+# === 2. map_symbol + 黑名单 ===
+from rnd import holdings_sync as hs
+
+check("NVDAUSDT → NVDA", hs.map_symbol("NVDAUSDT") == "NVDA")
+check("SPYUSDT → SPY", hs.map_symbol("SPYUSDT") == "SPY")
+check("小写归一", hs.map_symbol("aaplusdt") == "AAPL")
+check("SAMSUNGUSDT 黑名单→None", hs.map_symbol("SAMSUNGUSDT") is None)
+check("BZUSDT 布伦特→None（非美股 BZ）", hs.map_symbol("BZUSDT") is None)
+check("XAUUSDT 商品→None", hs.map_symbol("XAUUSDT") is None)
+check("非 USDT 结尾→None", hs.map_symbol("NVDABUSD") is None)
+
+
 # === 末尾判定 ===
 if failures:
     print(f"\n{len(failures)} 项失败: {failures}")
