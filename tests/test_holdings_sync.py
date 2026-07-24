@@ -116,6 +116,42 @@ jc.close()
 check("open_symbols 只含未平", osym == {"NVDA", "AMD"}, f"{osym}")
 
 
+# === 5. sync 编排 ===
+# 假闸门：除 RKLB/FLNC 外都放行（模拟中小盘被链质量挡）。
+fake_gate = lambda s: s not in {"RKLB", "FLNC"}
+
+# fund.db 当前持仓：NVDA(pinned+持有)/GOOGL(旧holdings)/AAPL(新,过)/RKLB(新,拒)/SAMSUNG(排除)
+db5 = _make_fund_db([
+    ("NVDAUSDT", "LONG", "BUY", 1.2),
+    ("GOOGLUSDT", "LONG", "BUY", 0.26),
+    ("AAPLUSDT", "LONG", "BUY", 0.5),
+    ("RKLBUSDT", "LONG", "BUY", 0.41),
+    ("SAMSUNGUSDT", "LONG", "BUY", 0.24),
+])
+yml5 = _write_yaml("baseline:\n  - SPY\n  - QQQ\nholdings:\n  - GOOGL\n  - MU\npinned:\n  - NVDA\n")
+jc5 = _make_rnd_db_with_journal([("p1", "open", "NVDA")])
+
+res = hs.sync(jc5, fund_db_path=db5, gate_fn=fake_gate, yaml_path=yml5)
+jc5.close()
+after = pool.read_pool(yml5)
+check("新标的过闸门→added", res["added"] == ["AAPL"], f"{res['added']}")
+check("闸门拒→rejected", res["rejected"] == ["RKLB"], f"{res['rejected']}")
+check("平仓且无 journal→removed（MU）", res["removed"] == ["MU"], f"{res['removed']}")
+check("黑名单→excluded", res["excluded"] == ["SAMSUNGUSDT"], f"{res['excluded']}")
+check("pinned 保留 NVDA", res["pinned"] == ["NVDA"], f"{res['pinned']}")
+check("holdings 写入 = 仍持有旧+新过闸门", set(after["holdings"]) == {"GOOGL", "AAPL"},
+      f"{after['holdings']}")
+check("baseline 不动", after["baseline"] == ["SPY", "QQQ"], f"{after['baseline']}")
+check("NVDA 不重复进 holdings（在 pinned）", "NVDA" not in after["holdings"])
+
+# 本机无 fund.db → skipped，池不动
+yml_skip = _write_yaml("baseline:\n  - SPY\nholdings:\n  - AAPL\npinned: []\n")
+res_skip = hs.sync(_make_rnd_db_with_journal([]), fund_db_path="/nonexistent.db",
+                   gate_fn=fake_gate, yaml_path=yml_skip)
+check("无库→skipped", "skipped" in res_skip, f"{res_skip}")
+check("skipped 不动池", pool.read_pool(yml_skip)["holdings"] == ["AAPL"])
+
+
 # === 末尾判定 ===
 if failures:
     print(f"\n{len(failures)} 项失败: {failures}")

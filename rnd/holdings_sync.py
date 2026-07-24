@@ -46,7 +46,7 @@ def derive_current_holdings(fund_db_path: str | Path = FUND_DB_PATH) -> set[str]
             "SELECT symbol, position_side, side, qty FROM binance_fills").fetchall()
     finally:
         conn.close()
-    net: dict[tuple, float] = {}
+    net: dict[tuple[str, str], float] = {}
     for symbol, pos_side, side, qty in rows:
         signed = qty if side == "BUY" else -qty
         key = (symbol, pos_side)
@@ -59,5 +59,52 @@ def resolve_holdings(fund_db_path: str | Path = FUND_DB_PATH) -> tuple[set[str],
     mapped, excluded = set(), set()
     for bsym in derive_current_holdings(fund_db_path):
         t = map_symbol(bsym)
-        (excluded.add(bsym) if t is None else mapped.add(t))
+        if t is None:
+            excluded.add(bsym)
+        else:
+            mapped.add(t)
     return mapped, excluded
+
+
+def sync(conn, fund_db_path: str | Path = FUND_DB_PATH,
+         gate_fn=None, yaml_path=None) -> dict:
+    """每日同步：fund.db 当前持仓 → 映射过滤 → 新标的过闸门 → 写 symbols.yaml。
+
+    纯计算 + 写 yaml；backfill/TG 副作用由调用方按返回 diff 触发。
+    conn：rnd db（读 open journal for pin）。
+    gate_fn(ticker)->bool：默认 admission.check_candidate(...)['verdict']（会实拉链）；
+        测试注入假闸门。仅对新候选调用（已在池的不重复体检）。
+    返回 {added, removed, pinned, rejected, excluded} 或 {skipped}。
+    """
+    from server import pool
+    from rnd import journal
+    p = Path(fund_db_path)
+    if not p.exists():
+        return {"skipped": f"fund.db 不存在（{fund_db_path}），跳过持仓同步"}
+    if gate_fn is None:
+        from rnd import admission
+        gate_fn = lambda s: bool(admission.check_candidate(s).get("verdict"))
+
+    mapped, excluded = resolve_holdings(fund_db_path)
+    cur = pool.read_pool(yaml_path)
+    baseline = set(cur["baseline"])
+    prev_holdings = set(cur["holdings"])
+    pinned = journal.open_symbols(conn)
+
+    candidates = mapped - baseline          # 当前持仓映射后、去基准
+    already = prev_holdings | pinned
+    passed, rejected = set(), set()
+    for s in sorted(candidates - already):  # 只对新候选过闸门
+        (passed if gate_fn(s) else rejected).add(s)
+
+    new_holdings = (candidates & prev_holdings) | passed
+    new_holdings -= pinned                  # pinned 独立成组，不重复进 holdings
+    added = new_holdings - prev_holdings
+    removed = (prev_holdings - new_holdings) - pinned
+
+    pool.write_pool(cur["baseline"], sorted(new_holdings), sorted(pinned), yaml_path)
+    return {
+        "added": sorted(added), "removed": sorted(removed),
+        "pinned": sorted(pinned), "rejected": sorted(rejected),
+        "excluded": sorted(excluded),
+    }
