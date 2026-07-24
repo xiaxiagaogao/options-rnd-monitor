@@ -151,6 +151,43 @@ res_skip = hs.sync(_make_rnd_db_with_journal([]), fund_db_path="/nonexistent.db"
 check("无库→skipped", "skipped" in res_skip, f"{res_skip}")
 check("skipped 不动池", pool.read_pool(yml_skip)["holdings"] == ["AAPL"])
 
+# 5a. holdings→pinned 降级（隔离测 new_holdings -= pinned 那行）
+db5b = _make_fund_db([
+    ("NVDAUSDT", "LONG", "BUY", 1.0),
+    ("GOOGLUSDT", "LONG", "BUY", 0.3),
+])
+yml5b = _write_yaml("baseline:\n  - SPY\nholdings:\n  - NVDA\n  - GOOGL\npinned: []\n")
+jc5b = _make_rnd_db_with_journal([("p1", "open", "NVDA")])
+res5b = hs.sync(jc5b, fund_db_path=db5b, gate_fn=fake_gate, yaml_path=yml5b)
+jc5b.close()
+after5b = pool.read_pool(yml5b)
+check("holdings→pinned 降级：NVDA 退出 holdings", "NVDA" not in after5b["holdings"],
+      f"{after5b['holdings']}")
+check("holdings→pinned 降级：pinned=NVDA", res5b["pinned"] == ["NVDA"], f"{res5b['pinned']}")
+check("holdings→pinned 降级：不计入 added", "NVDA" not in res5b["added"], f"{res5b['added']}")
+check("holdings→pinned 降级：不计入 removed", "NVDA" not in res5b["removed"], f"{res5b['removed']}")
+
+# 5b. gate_fn 逐标的异常隔离：一个标的抛异常不堵死其他候选
+def raise_gate(s):
+    if s == "AAPL":
+        raise RuntimeError("boom")
+    return True
+
+db5c = _make_fund_db([
+    ("AAPLUSDT", "LONG", "BUY", 0.5),
+    ("MSFTUSDT", "LONG", "BUY", 0.4),
+])
+yml5c = _write_yaml("baseline:\n  - SPY\nholdings: []\npinned: []\n")
+jc5c = _make_rnd_db_with_journal([])
+res5c = hs.sync(jc5c, fund_db_path=db5c, gate_fn=raise_gate, yaml_path=yml5c)
+jc5c.close()
+after5c = pool.read_pool(yml5c)
+check("gate 异常隔离：AAPL 进 gate_errors", res5c["gate_errors"] == ["AAPL"],
+      f"{res5c['gate_errors']}")
+check("gate 异常隔离：MSFT 仍 added", "MSFT" in res5c["added"], f"{res5c['added']}")
+check("gate 异常隔离：yaml 正常写入（未被异常堵死）", "MSFT" in after5c["holdings"],
+      f"{after5c['holdings']}")
+
 
 # === 末尾判定 ===
 if failures:

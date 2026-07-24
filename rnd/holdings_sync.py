@@ -73,8 +73,9 @@ def sync(conn, fund_db_path: str | Path = FUND_DB_PATH,
     纯计算 + 写 yaml；backfill/TG 副作用由调用方按返回 diff 触发。
     conn：rnd db（读 open journal for pin）。
     gate_fn(ticker)->bool：默认 admission.check_candidate(...)['verdict']（会实拉链）；
-        测试注入假闸门。仅对新候选调用（已在池的不重复体检）。
-    返回 {added, removed, pinned, rejected, excluded} 或 {skipped}。
+        测试注入假闸门。仅对新候选调用（已在池的不重复体检）。gate_fn 逐标的异常隔离：
+        单个标的检查出错不影响其他候选，本次跳过、下次再试。
+    返回 {added, removed, pinned, rejected, excluded, gate_errors} 或 {skipped}。
     """
     from server import pool
     from rnd import journal
@@ -93,18 +94,25 @@ def sync(conn, fund_db_path: str | Path = FUND_DB_PATH,
 
     candidates = mapped - baseline          # 当前持仓映射后、去基准
     already = prev_holdings | pinned
-    passed, rejected = set(), set()
+    passed, rejected, gate_errors = set(), set(), set()
     for s in sorted(candidates - already):  # 只对新候选过闸门
-        (passed if gate_fn(s) else rejected).add(s)
+        try:
+            ok = gate_fn(s)
+        except Exception as e:  # noqa: BLE001
+            gate_errors.add(s)
+            print(f"  持仓同步: {s} 闸门检查出错，本次跳过（{type(e).__name__}: {e}）")
+            continue
+        (passed if ok else rejected).add(s)
 
     new_holdings = (candidates & prev_holdings) | passed
     new_holdings -= pinned                  # pinned 独立成组，不重复进 holdings
     added = new_holdings - prev_holdings
     removed = (prev_holdings - new_holdings) - pinned
 
-    pool.write_pool(cur["baseline"], sorted(new_holdings), sorted(pinned), yaml_path)
+    if new_holdings != prev_holdings or set(pinned) != set(cur["pinned"]):
+        pool.write_pool(cur["baseline"], sorted(new_holdings), sorted(pinned), yaml_path)
     return {
         "added": sorted(added), "removed": sorted(removed),
         "pinned": sorted(pinned), "rejected": sorted(rejected),
-        "excluded": sorted(excluded),
+        "excluded": sorted(excluded), "gate_errors": sorted(gate_errors),
     }
