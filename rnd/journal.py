@@ -20,6 +20,19 @@ def _open_positions(conn):
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+def open_symbols(conn) -> set[str]:
+    """当前有未平仓 trade_journal 的标的集合（持仓同步 pin 保护用）。"""
+    rows = conn.execute("""
+        SELECT DISTINCT t.symbol FROM trade_journal t
+        JOIN (SELECT position_id, MAX(event_id) AS mid FROM trade_journal
+              WHERE event_type IN ('open','roll_repin') GROUP BY position_id) last
+          ON t.event_id = last.mid
+        WHERE t.position_id NOT IN
+              (SELECT position_id FROM trade_journal WHERE event_type='close')
+    """).fetchall()
+    return {r[0] for r in rows}
+
+
 def roll_repin_check(conn) -> list[dict]:
     """检查全部开仓持仓，需要时追加 roll_repin。返回重钉记录清单。"""
     repinned = []

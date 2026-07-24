@@ -91,6 +91,31 @@ check("resolve 映射美股", mapped == {"NVDA", "GOOGL", "TSLA"}, f"{mapped}")
 check("resolve 排除黑名单", excluded == {"SAMSUNGUSDT"}, f"{excluded}")
 
 
+# === 4. journal.open_symbols ===
+from rnd import db as rnddb, journal
+
+def _make_rnd_db_with_journal(events) -> "sqlite3.Connection":
+    """events: list of (position_id, event_type, symbol)。返回内存 rnd conn。"""
+    f = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
+    f.close()
+    conn = rnddb.get_conn(Path(f.name))
+    conn.executemany(
+        "INSERT INTO trade_journal (position_id, event_type, event_date, symbol) "
+        "VALUES (?,?,?,?)",
+        [(pid, et, "2026-07-24", sym) for pid, et, sym in events])
+    conn.commit()
+    return conn
+
+jc = _make_rnd_db_with_journal([
+    ("p1", "open", "NVDA"),                 # 未平 → open
+    ("p2", "open", "SPY"), ("p2", "close", "SPY"),  # 已平 → 不算
+    ("p3", "open", "AMD"), ("p3", "roll_repin", "AMD"),  # roll 后仍未平 → open
+])
+osym = journal.open_symbols(jc)
+jc.close()
+check("open_symbols 只含未平", osym == {"NVDA", "AMD"}, f"{osym}")
+
+
 # === 末尾判定 ===
 if failures:
     print(f"\n{len(failures)} 项失败: {failures}")
