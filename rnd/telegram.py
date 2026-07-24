@@ -11,7 +11,7 @@ import httpx
 from . import config  # 触发 .env 加载
 
 TG_LIMIT = 3900          # TG 单条 4096，留余量
-DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "<TELEGRAM_CHAT_ID>")
+DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # 必配于 .env（无内置默认；见 .env.example）
 
 
 class TelegramNotConfigured(RuntimeError):

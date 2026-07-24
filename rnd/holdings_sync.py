@@ -6,7 +6,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-FUND_DB_PATH = os.getenv("FUND_DB_PATH", "<FUND_DB_PATH>")
+FUND_DB_PATH = os.getenv("FUND_DB_PATH", "data/fund.db")  # 币安基金看板 fund.db 路径，配于 .env（见 .env.example）；不存在 → 持仓同步降级 no-op
 HELD_EPS = 1e-9
 
 # 无美股期权 → 排除（framework §6.2）。值为原因，仅供告警可读。

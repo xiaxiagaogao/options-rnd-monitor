@@ -10,3 +10,6 @@ ThetaTerminal*.jar
 theta_terminal/
 output/
 backup/
+
+# 根目录图片（设计截图等）不入库
+/*.png
