@@ -1,6 +1,7 @@
-"""动态槽池管理：换入/换出 symbols.yaml + 派发后台回填 + 进度跟踪。
+"""标的池管理：baseline/holdings/pinned 三组 + 派发后台回填 + 进度跟踪。
 
-spec §2：动态槽 2 个；换入前强制准入检查；换入即回填；换出不删数据。
+holdings-sync-framework §4.2：baseline 恒在 + holdings 持仓驱动 + pinned 强保留。
+MAX_DYNAMIC 仅约束手动 swap_in 这个后门（正常 holdings 由 rnd/holdings_sync.py 每日重写）。
 """
 import os
 import re
@@ -15,50 +16,72 @@ from rnd.config import PROJECT_ROOT
 MAX_DYNAMIC = 2
 _JOBS: dict[str, dict] = {}   # symbol -> {pid, log}
 
-_YAML_TEMPLATE = """# 标的池（spec §1/§2）：固定 3 + 动态 2。换出不删数据。
-fixed:
-{fixed}
-dynamic:
-  # 动态槽换入前必须通过准入检查（spec §2，rnd/admission.py）：
-  # ATM 邻域相对点差中位数 ≤ 3%；±20% moneyness 双边报价行权价 ≥ 15 个
-{dynamic}
+_YAML_TEMPLATE = """# 标的池（holdings-sync-framework §4.2）：baseline 恒在 + holdings 持仓驱动 + pinned 强保留。
+# holdings 由 rnd/holdings_sync.py 每日重写，勿手动编辑。
+baseline:
+{baseline}
+holdings:
+{holdings}
+pinned:
+{pinned}
 
 # 到期日规则（spec §1）
 expiry:
   monthly_only: true
   dte_min: 7
   dte_max: 60
-  count: 2          # 最近两个月度各算一套
+  count: 2
 """
 
 
-def read_pool() -> dict:
-    cfg = yaml.safe_load((PROJECT_ROOT / "symbols.yaml").read_text())
-    return {"fixed": list(cfg.get("fixed", [])), "dynamic": list(cfg.get("dynamic") or [])}
+def _yaml_path(yaml_path=None):
+    return Path(yaml_path) if yaml_path else (PROJECT_ROOT / "symbols.yaml")
 
 
-def _write_pool(fixed: list[str], dynamic: list[str]):
-    fixed_s = "\n".join(f"  - {s}" for s in fixed)
-    dynamic_s = "\n".join(f"  - {s}" for s in dynamic) if dynamic else "  []"
-    (PROJECT_ROOT / "symbols.yaml").write_text(
-        _YAML_TEMPLATE.format(fixed=fixed_s, dynamic=dynamic_s))
+def read_pool(yaml_path=None) -> dict:
+    cfg = yaml.safe_load(_yaml_path(yaml_path).read_text())
+    return {
+        "baseline": list(cfg.get("baseline") or []),
+        "holdings": list(cfg.get("holdings") or []),
+        "pinned": list(cfg.get("pinned") or []),
+    }
+
+
+def _fmt(items):
+    return "\n".join(f"  - {s}" for s in items) if items else "  []"
+
+
+def write_pool(baseline, holdings, pinned, yaml_path=None):
+    _yaml_path(yaml_path).write_text(_YAML_TEMPLATE.format(
+        baseline=_fmt(baseline), holdings=_fmt(holdings), pinned=_fmt(pinned)))
+
+
+def effective_symbols(yaml_path=None) -> list[str]:
+    """有效池 = baseline ∪ holdings ∪ pinned，去重保序。"""
+    p = read_pool(yaml_path)
+    out = []
+    for group in (p["baseline"], p["holdings"], p["pinned"]):
+        for s in group:
+            if s not in out:
+                out.append(s)
+    return out
 
 
 def swap_in(symbol: str, replace: str | None = None) -> dict:
     symbol = symbol.upper()
-    pool = read_pool()
-    if symbol in pool["fixed"] + pool["dynamic"]:
+    p = read_pool()
+    if symbol in p["baseline"] + p["holdings"] + p["pinned"]:
         return {"ok": False, "error": f"{symbol} 已在池中"}
-    dynamic = pool["dynamic"]
-    if len(dynamic) >= MAX_DYNAMIC:
-        if not replace or replace.upper() not in dynamic:
+    holdings = p["holdings"]
+    if len(holdings) >= MAX_DYNAMIC:
+        if not replace or replace.upper() not in holdings:
             return {"ok": False, "error": "动态槽已满，需指定换出哪一个",
-                    "dynamic": dynamic}
-        dynamic = [s for s in dynamic if s != replace.upper()]
-    dynamic.append(symbol)
-    _write_pool(pool["fixed"], dynamic)
+                    "holdings": holdings}
+        holdings = [s for s in holdings if s != replace.upper()]
+    holdings.append(symbol)
+    write_pool(p["baseline"], holdings, p["pinned"])
     job = _spawn_backfill(symbol)
-    return {"ok": True, "dynamic": dynamic, "swapped_out": replace, "backfill": job}
+    return {"ok": True, "holdings": holdings, "swapped_out": replace, "backfill": job}
 
 
 def _spawn_backfill(symbol: str) -> dict:
@@ -85,9 +108,9 @@ def _pid_alive(pid: int) -> bool:
 def status() -> dict:
     from rnd import db
     conn = db.get_conn()
-    pool = read_pool()
+    p = read_pool()
     out = []
-    for sym in pool["dynamic"]:
+    for sym in p["holdings"]:
         rows, latest = conn.execute(
             "SELECT COUNT(*), MAX(date) FROM rnd_indicators WHERE symbol=?",
             (sym,)).fetchone()
@@ -105,4 +128,4 @@ def status() -> dict:
         out.append({"symbol": sym, "rows": rows, "latest": latest,
                     "running": running, "progress": progress})
     conn.close()
-    return {"dynamic": out, "slots": f"{len(pool['dynamic'])}/{MAX_DYNAMIC}"}
+    return {"holdings": out, "count": len(p["holdings"])}
