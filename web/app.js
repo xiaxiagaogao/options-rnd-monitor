@@ -83,7 +83,7 @@ createApp({
     dcdfData: { ok: false }, pitData: { ok: false },
     switchSeq: 0, loadingSym: false, uiFading: false,
     admSymbol: "", admBusy: false, admResult: null, admPool: [], admErr: "",
-    poolStatus: {}, poolTimer: null,
+    poolStatus: { holdings: [], count: 0 }, poolTimer: null,
     cmpMode: "prev", cmpLabel: "",
     diagMeta: null,
     form: { direction: "long", identity: "speculative", entry_price: "", risk_budget: "",
@@ -654,10 +654,10 @@ createApp({
     async poolAdd() {
       this.admBusy = true; this.admErr = "";
       try {
-        const dyn = (this.poolStatus.dynamic || []).map(d => d.symbol);
+        const dyn = (this.poolStatus.holdings || []).map(d => d.symbol);
         let replace = null;
         if (dyn.length >= 2) {
-          replace = prompt(`动态槽已满，换出哪一个？（${dyn.join(" / ")}）\n换出不删数据，换回零成本`);
+          replace = prompt(`持仓组已满，换出哪一个？（${dyn.join(" / ")}）\n换出不删数据，换回零成本`);
           if (!replace) { this.admBusy = false; return; }
         }
         const r = await api("/api/pool/add", { method: "POST",
@@ -672,7 +672,7 @@ createApp({
     },
     async refreshPool() {
       this.poolStatus = await api("/api/pool/status");
-      const anyRunning = (this.poolStatus.dynamic || []).some(d => d.running);
+      const anyRunning = (this.poolStatus.holdings || []).some(d => d.running);
       clearTimeout(this.poolTimer);
       if (anyRunning) this.poolTimer = setTimeout(() => this.refreshPool(), 30000);
     },

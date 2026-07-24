@@ -101,7 +101,7 @@
           </div>
         <div class="card">
           <div class="row card-head"><span class="card-title">添加标的</span>
-            <span class="annot">动态槽 {{ poolStatus.slots || '—' }}</span></div>
+            <span class="annot">持仓标的 {{ poolStatus.count ?? '—' }}</span></div>
           <div class="fx gap6" style="display:flex">
             <input v-model="admSymbol" placeholder="代码，如 AMD" class="adm-input"
                    @keyup.enter="runAdmission" />
@@ -129,7 +129,7 @@
             </template>
             <div v-else class="login-err">{{ admResult.error }}</div>
           </div>
-          <div v-for="d in poolStatus.dynamic" :key="d.symbol" class="qrow">
+          <div v-for="d in poolStatus.holdings" :key="d.symbol" class="qrow">
             <span class="muted">{{ d.symbol }}</span>
             <span style="font-size:11px">{{ d.running ? (d.progress || '回填中…')
               : (d.progress==='完成' || d.latest ? '就绪 · ' + (d.latest||'') : '等待回填') }}</span>
