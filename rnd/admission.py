@@ -99,7 +99,5 @@ def pool_reference() -> list[dict]:
 
 
 def fetch_pool_symbols() -> list[str]:
-    import yaml
-    from .config import PROJECT_ROOT
-    cfg = yaml.safe_load((PROJECT_ROOT / "symbols.yaml").read_text())
-    return list(cfg.get("fixed", [])) + list(cfg.get("dynamic") or [])
+    from server.pool import effective_symbols
+    return effective_symbols()

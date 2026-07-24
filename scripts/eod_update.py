@@ -22,6 +22,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backfill import compute_symbol, with_retry  # 复用计算循环与重试
 
 
+def _spawn_backfill(symbol: str):
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    log = root / "output" / f"backfill_{symbol}.log"
+    log.parent.mkdir(exist_ok=True)
+    with open(log, "ab") as fh:
+        subprocess.Popen(
+            [sys.executable, str(root / "scripts" / "backfill.py"),
+             "--symbols", symbol, "--years", "3"],
+            stdout=fh, stderr=subprocess.STDOUT, cwd=root, start_new_session=True)
+    print(f"    回填派发: {symbol}（后台，日志 {log.name}）")
+
+
+def _notify_holdings(res: dict):
+    # 仅在有新纳入或闸门出错时推送（避免每日重复告警持有的黑名单标的）
+    if not (res.get("added") or res.get("gate_errors")):
+        return
+    from rnd import telegram
+    from rnd.holdings_sync import SYMBOL_BLACKLIST
+    lines = []
+    if res.get("added"):
+        lines.append("新纳入标的（持仓同步）: " + ", ".join(res["added"]))
+    if res.get("gate_errors"):
+        lines.append("闸门检查出错（下次重试）: " + ", ".join(res["gate_errors"]))
+    if res.get("excluded"):
+        parts = [f"{s}（{SYMBOL_BLACKLIST.get(s, '未映射')}）" for s in res["excluded"]]
+        lines.append("持仓中未纳入: " + ", ".join(parts))
+    try:
+        telegram.send("【持仓同步】\n" + "\n".join(lines))
+    except telegram.TelegramNotConfigured:
+        pass
+
+
 def update_symbol(conn, symbol: str, sofr: pd.Series, today: dt.date) -> int:
     last = conn.execute("SELECT MAX(date) FROM raw_chain WHERE symbol=?",
                         (symbol,)).fetchone()[0]
@@ -80,8 +113,41 @@ def update_symbol(conn, symbol: str, sofr: pd.Series, today: dt.date) -> int:
 def main():
     today = dt.date.today()
     conn = db.get_conn()
-    symbols = [s.strip() for s in
-               (sys.argv[1].split(",") if len(sys.argv) > 1 else ["SPY", "QQQ", "NVDA"])]
+
+    # 持仓同步（holdings-sync）：先跑，用最新持仓驱动池。失败不阻断数据。
+    from rnd import holdings_sync
+    from server import pool
+    try:
+        res = holdings_sync.sync(conn)
+        if "skipped" in res:
+            print(f"持仓同步: {res['skipped']}")
+        else:
+            print(f"持仓同步: +{res['added']} -{res['removed']} pin={res['pinned']} "
+                  f"拒={res['rejected']} 排除={res['excluded']} 错={res.get('gate_errors', [])}")
+            for sym in res["added"]:
+                _spawn_backfill(sym)
+            _notify_holdings(res)
+    except Exception as e:  # noqa: BLE001
+        print(f"持仓同步: 失败但不影响数据（{type(e).__name__}: {e}）")
+
+    # 更新对象 = 有效池（argv 显式指定时仍尊重）；但**只更新已有数据的标的**——
+    # 新 added 标的当天还在后台 backfill、raw_chain 无数据，MAX(date) 为 None，
+    # 必须排除出增量循环（否则 dt.date.fromisoformat(None) 崩）。
+    if len(sys.argv) > 1:
+        requested = [s.strip() for s in sys.argv[1].split(",")]
+    else:
+        requested = pool.effective_symbols()
+    symbols = [s for s in requested
+               if conn.execute("SELECT MAX(date) FROM raw_chain WHERE symbol=?",
+                               (s,)).fetchone()[0] is not None]
+    skipped_new = [s for s in requested if s not in symbols]
+    if skipped_new:
+        print(f"  本次跳过（无数据，backfill 中）: {skipped_new}")
+    if not symbols:
+        print("无已落库标的可增量更新。")
+        conn.close()
+        return
+
     lo = min(dt.date.fromisoformat(
         conn.execute("SELECT MAX(date) FROM raw_chain WHERE symbol=?", (s,)).fetchone()[0])
         for s in symbols)

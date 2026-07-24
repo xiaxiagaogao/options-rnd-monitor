@@ -6,10 +6,8 @@ from functools import lru_cache
 
 import numpy as np
 import pandas as pd
-import yaml
 
 from rnd import db
-from rnd.config import PROJECT_ROOT
 from rnd.state import STATE_INDICATORS
 
 # 指标白话（spec §4 说明列的 UI 化）
@@ -34,8 +32,8 @@ LABELS = {
 
 
 def get_symbols() -> list[str]:
-    cfg = yaml.safe_load((PROJECT_ROOT / "symbols.yaml").read_text())
-    return list(cfg.get("fixed", [])) + list(cfg.get("dynamic") or [])
+    from server.pool import effective_symbols
+    return effective_symbols()
 
 
 def benchmark_of(symbol: str) -> str:
