@@ -115,20 +115,30 @@ def main():
     conn = db.get_conn()
 
     # 持仓同步（holdings-sync）：先跑，用最新持仓驱动池。失败不阻断数据。
+    # sync/backfill 派发/notify 三段独立兜底：sync 成功后，backfill 或 notify 出错
+    # 不可误报"sync 失败"（否则明天不再把该标的当 added，永久卡在 MAX(date) IS NULL）。
     from rnd import holdings_sync
     from server import pool
     try:
         res = holdings_sync.sync(conn)
+    except Exception as e:  # noqa: BLE001
+        print(f"持仓同步: sync 失败但不影响数据（{type(e).__name__}: {e}）")
+        res = None
+    if res is not None:
         if "skipped" in res:
             print(f"持仓同步: {res['skipped']}")
         else:
             print(f"持仓同步: +{res['added']} -{res['removed']} pin={res['pinned']} "
                   f"拒={res['rejected']} 排除={res['excluded']} 错={res.get('gate_errors', [])}")
             for sym in res["added"]:
-                _spawn_backfill(sym)
-            _notify_holdings(res)
-    except Exception as e:  # noqa: BLE001
-        print(f"持仓同步: 失败但不影响数据（{type(e).__name__}: {e}）")
+                try:
+                    _spawn_backfill(sym)
+                except Exception as e:  # noqa: BLE001
+                    print(f"  回填派发失败 {sym}（{type(e).__name__}: {e}）")
+            try:
+                _notify_holdings(res)
+            except Exception as e:  # noqa: BLE001
+                print(f"  持仓同步告警失败（{type(e).__name__}: {e}）")
 
     # 更新对象 = 有效池（argv 显式指定时仍尊重）；但**只更新已有数据的标的**——
     # 新 added 标的当天还在后台 backfill、raw_chain 无数据，MAX(date) 为 None，
