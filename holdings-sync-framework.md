@@ -198,7 +198,7 @@ pinned:   [NVDA]            # 有 open journal，强制保留（自动维护，�
 | # | 决定 |
 |---|---|
 | H1 | **直接只读**（WAL 允许并发只读，风险低）；不做快照拷贝。 |
-| H2 | `pinned` **自动为主**（open journal 推导）+ 手动可加兜底。 |
+| H2 | `pinned` **完全由 open journal 驱动**（sync 每日自动重写、勿手动编辑）。**2026-07-24 final review descope**：原「手动可加兜底」取消——手动 pinned 会被 sync 覆盖删；要手动保住某标的 → 建一条 open `trade_journal` 条目，或用「添加标的」admin 后门。 |
 | H3 | 「添加标的」手动卡**保留为 admin 应急后门**（不删）。 |
 | H4 | 前端来源徽标 **v0.1 后置**，本期不做。 |
 | H5 | **实现阶段执行**：回写 `rnd-dashboard-spec.md` §1/§2 标的池语义（fixed/dynamic → baseline/holdings）。 |
@@ -211,3 +211,4 @@ pinned:   [NVDA]            # 有 open journal，强制保留（自动维护，�
 |---|---|
 | 2026-07-23 | v0：立法——只同步标的、读 fund.db derive、baseline+holdings 池模型、映射黑名单、EOD 挂载、journal pin、本机降级。 |
 | 2026-07-23 | v1：**定版**——§11 待决项按倾向敲定（H1 直接只读 / H2 pinned 自动+手动 / H3 手动卡留 admin / H4 徽标后置 / H5 回写主 spec 留实现阶段）。 |
+| 2026-07-24 | v2：**实现 + final review**——Task 1-7 落地（TDD，44 测试）；§11 H2 手动 pinned 兜底 **descope**（sync 覆盖写、勿手动编辑，手动保标的走 journal/admin 后门）；修 pinned→holdings 降级被误当新标的（gate 豁免用盘上旧 pinned）。 |
