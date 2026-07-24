@@ -39,6 +39,7 @@ def _yaml_path(yaml_path=None):
 
 
 def read_pool(yaml_path=None) -> dict:
+    """读取标的池：返回 {baseline, holdings, pinned} 三组 list[str]。"""
     cfg = yaml.safe_load(_yaml_path(yaml_path).read_text())
     return {
         "baseline": list(cfg.get("baseline") or []),
@@ -51,7 +52,8 @@ def _fmt(items):
     return "\n".join(f"  - {s}" for s in items) if items else "  []"
 
 
-def write_pool(baseline, holdings, pinned, yaml_path=None):
+def write_pool(baseline: list[str], holdings: list[str], pinned: list[str], yaml_path=None):
+    """写入标的池：baseline/holdings/pinned 三组整体重写 yaml_path（默认 symbols.yaml）。"""
     _yaml_path(yaml_path).write_text(_YAML_TEMPLATE.format(
         baseline=_fmt(baseline), holdings=_fmt(holdings), pinned=_fmt(pinned)))
 
@@ -75,7 +77,7 @@ def swap_in(symbol: str, replace: str | None = None) -> dict:
     holdings = p["holdings"]
     if len(holdings) >= MAX_DYNAMIC:
         if not replace or replace.upper() not in holdings:
-            return {"ok": False, "error": "动态槽已满，需指定换出哪一个",
+            return {"ok": False, "error": "持仓组已满，需指定换出哪一个",
                     "holdings": holdings}
         holdings = [s for s in holdings if s != replace.upper()]
     holdings.append(symbol)
