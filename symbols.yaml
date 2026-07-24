@@ -1,5 +1,6 @@
 # 标的池（holdings-sync-framework §4.2）：baseline 恒在 + holdings 持仓驱动 + pinned 强保留。
-# holdings 由 rnd/holdings_sync.py 每日重写，勿手动编辑。
+# holdings 与 pinned 均由 rnd/holdings_sync.py 每日自动重写，勿手动编辑。
+# （要手动保住一个标的：建一条 open trade_journal 条目，或用「添加标的」admin 后门）
 baseline:
   - SPY
   - QQQ

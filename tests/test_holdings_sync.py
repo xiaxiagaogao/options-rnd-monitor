@@ -189,6 +189,24 @@ check("gate 异常隔离：yaml 正常写入（未被异常堵死）", "MSFT" in
       f"{after5c['holdings']}")
 
 
+# === 6. pinned→holdings 降级不重复过闸门/不误报（final review gap 2）===
+_gate_calls6 = []
+def _recording_gate6(s):
+    _gate_calls6.append(s)
+    return True
+# fund.db 仍持有 NVDA；盘上 pinned=[NVDA]（昨天 journal 写的）；今天 journal 已平仓
+db6 = _make_fund_db([("NVDAUSDT", "LONG", "BUY", 1.2)])
+yml6 = _write_yaml("baseline:\n  - SPY\nholdings: []\npinned:\n  - NVDA\n")
+jc6 = _make_rnd_db_with_journal([])   # 无 open journal
+res6 = hs.sync(jc6, fund_db_path=db6, gate_fn=_recording_gate6, yaml_path=yml6)
+jc6.close()
+after6 = pool.read_pool(yml6)
+check("降级不重复 gate", "NVDA" not in _gate_calls6, f"gate_calls={_gate_calls6}")
+check("降级不误报 added", "NVDA" not in res6["added"], f"added={res6['added']}")
+check("降级进 holdings", after6["holdings"] == ["NVDA"], f"{after6['holdings']}")
+check("journal 平仓后 pinned 空", after6["pinned"] == [], f"{after6['pinned']}")
+
+
 # === 末尾判定 ===
 if failures:
     print(f"\n{len(failures)} 项失败: {failures}")

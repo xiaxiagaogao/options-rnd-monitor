@@ -93,9 +93,12 @@ def sync(conn, fund_db_path: str | Path = FUND_DB_PATH,
     pinned = journal.open_symbols(conn)
 
     candidates = mapped - baseline          # 当前持仓映射后、去基准
-    already = prev_holdings | pinned
+    # 曾在池（holdings 或盘上旧 pinned）= 已建立，不重复体检。关键：用盘上旧 pinned
+    # cur["pinned"] 而非新算的 pinned——否则标的从 pinned 降级（journal 平仓但仍持有）
+    # 会被误当全新标的：重复过闸门 + spurious backfill + 误报"新纳入"，gate 当天若失败还会掉出池。
+    established = prev_holdings | set(cur["pinned"])
     passed, rejected, gate_errors = set(), set(), set()
-    for s in sorted(candidates - already):  # 只对新候选过闸门
+    for s in sorted(candidates - established - pinned):  # 只对真正的新标的过闸门
         try:
             ok = gate_fn(s)
         except Exception as e:  # noqa: BLE001
@@ -104,9 +107,9 @@ def sync(conn, fund_db_path: str | Path = FUND_DB_PATH,
             continue
         (passed if ok else rejected).add(s)
 
-    new_holdings = (candidates & prev_holdings) | passed
+    new_holdings = (candidates & established) | passed   # 仍持有的已建立标的（含从 pinned 降级）+ 新过闸门
     new_holdings -= pinned                  # pinned 独立成组，不重复进 holdings
-    added = new_holdings - prev_holdings
+    added = new_holdings - prev_holdings - set(cur["pinned"])   # 真新增（排除从 pinned 降级，避免重复 backfill/误报）
     removed = (prev_holdings - new_holdings) - pinned
 
     if new_holdings != prev_holdings or set(pinned) != set(cur["pinned"]):
