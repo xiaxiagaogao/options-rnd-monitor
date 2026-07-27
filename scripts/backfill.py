@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 
+from thetadata.errors import NoDataFoundError
+
 from rnd import db, fetch
 from rnd.compute import ComputeError, compute_day
 from rnd.timeseries import postprocess_symbol
@@ -29,6 +31,8 @@ def with_retry(fn, tries=4, base=5, label=""):
     for i in range(tries):
         try:
             return fn()
+        except NoDataFoundError:
+            raise   # 数据不存在是确定性结果（上市前/无此到期），重试无用，交调用方处理
         except Exception as e:
             if i == tries - 1:
                 raise
@@ -41,6 +45,9 @@ def ingest_symbol(conn, symbol: str, start: dt.date, end: dt.date, sofr: pd.Seri
     stock = with_retry(
         lambda: fetch.stock_history_eod_chunked(symbol, start, end),
         label=f"{symbol} stock")
+    if stock.empty:
+        print(f"  {symbol}: 窗口内无股票数据（整段在上市前？），跳过")
+        return
     stock = stock.assign(date=pd.to_datetime(stock["created"]).dt.date)
     closes = dict(zip(stock["date"], stock["close"].astype(float)))
     calendar = sorted(closes)
@@ -69,11 +76,15 @@ def ingest_symbol(conn, symbol: str, start: dt.date, end: dt.date, sofr: pd.Seri
             print(f"  [{n}/{len(monthlies)}] {expiry} 已入库，跳过")
             continue
         t0 = time.time()
-        raw = with_retry(
-            lambda: fetch.fetch_chain_eod(symbol, expiry, s) if s == e else
-            fetch._client().option_history_eod(start_date=s, end_date=e,
-                                               symbol=symbol, expiration=expiry),
-            label=f"{symbol} {expiry}")
+        try:
+            raw = with_retry(
+                lambda: fetch.fetch_chain_eod(symbol, expiry, s) if s == e else
+                fetch._client().option_history_eod(start_date=s, end_date=e,
+                                                   symbol=symbol, expiration=expiry),
+                label=f"{symbol} {expiry}")
+        except NoDataFoundError:
+            print(f"  [{n}/{len(monthlies)}] {expiry}: 无期权数据（上市前/未挂牌），跳过")
+            continue
         raw = raw.assign(date=pd.to_datetime(raw["created"]).dt.date)
         rows = []
         for r in raw.itertuples():
@@ -149,18 +160,23 @@ def main():
     sofr = fetch.fetch_sofr_series(start, end)
     print(f"SOFR 序列 {len(sofr)} 天（{sofr.index[0]} → {sofr.index[-1]}）")
 
+    from rnd.state import compute_state
+    failed = []
     for symbol in symbols:
         print(f"\n===== {symbol} =====")
-        if not args.skip_fetch:
-            ingest_symbol(conn, symbol, start, end, sofr)
-        compute_symbol(conn, symbol, args.recompute)
-        postprocess_symbol(conn, symbol)
-        from rnd.state import compute_state
-        compute_state(conn, symbol)
-        n = conn.execute("SELECT COUNT(*), SUM(gate_pass) FROM rnd_indicators"
-                         " WHERE symbol=?", (symbol,)).fetchone()
-        print(f"  {symbol}: rnd_indicators {n[0]} 行，闸门通过 {n[1]}")
-    print("\n回填完成。")
+        try:   # 单标的失败（如某标的链数据异常）不中断其它标的的回填
+            if not args.skip_fetch:
+                ingest_symbol(conn, symbol, start, end, sofr)
+            compute_symbol(conn, symbol, args.recompute)
+            postprocess_symbol(conn, symbol)
+            compute_state(conn, symbol)
+            n = conn.execute("SELECT COUNT(*), SUM(gate_pass) FROM rnd_indicators"
+                             " WHERE symbol=?", (symbol,)).fetchone()
+            print(f"  {symbol}: rnd_indicators {n[0]} 行，闸门通过 {n[1]}")
+        except Exception as e:   # noqa: BLE001
+            failed.append(symbol)
+            print(f"  {symbol}: 回填失败，跳过（{type(e).__name__}: {str(e)[:150]}）")
+    print(f"\n回填完成。{'失败: ' + ', '.join(failed) if failed else '全部成功。'}")
 
 
 if __name__ == "__main__":

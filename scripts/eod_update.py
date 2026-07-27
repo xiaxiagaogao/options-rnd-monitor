@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
+from thetadata.errors import NoDataFoundError
 
 from rnd import db, fetch
 from rnd.state import compute_state
@@ -22,17 +23,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backfill import compute_symbol, with_retry  # 复用计算循环与重试
 
 
-def _spawn_backfill(symbol: str):
+def _spawn_backfill(symbols: list[str]):
+    """一个后台进程串行回填所有新标的。ThetaData 免费档单终端会话，绝不能多进程
+    并发拉（会 Invalid session ID 崩）。故：①一次 spawn 一个进程、内部串行遍历；
+    ②由调用方放在 eod_update 增量之后 spawn——此时主进程即将退出、ThetaData 空闲，
+    backfill 独占，不与增量抢会话。"""
     import subprocess
     root = Path(__file__).resolve().parent.parent
-    log = root / "output" / f"backfill_{symbol}.log"
+    log = root / "output" / f"backfill_holdings_{dt.date.today().isoformat()}.log"
     log.parent.mkdir(exist_ok=True)
     with open(log, "ab") as fh:
         subprocess.Popen(
             [sys.executable, str(root / "scripts" / "backfill.py"),
-             "--symbols", symbol, "--years", "3"],
+             "--symbols", ",".join(symbols), "--years", "3"],
             stdout=fh, stderr=subprocess.STDOUT, cwd=root, start_new_session=True)
-    print(f"    回填派发: {symbol}（后台，日志 {log.name}）")
+    print(f"    回填派发（串行）: {', '.join(symbols)}（后台，日志 {log.name}）")
 
 
 def _notify_holdings(res: dict):
@@ -87,10 +92,14 @@ def update_symbol(conn, symbol: str, sofr: pd.Series, today: dt.date) -> int:
         if s > e:
             continue
         t0 = time.time()
-        raw = with_retry(
-            lambda: fetch._client().option_history_eod(
-                start_date=s, end_date=e, symbol=symbol, expiration=expiry),
-            label=f"{symbol} {expiry}")
+        try:
+            raw = with_retry(
+                lambda: fetch._client().option_history_eod(
+                    start_date=s, end_date=e, symbol=symbol, expiration=expiry),
+                label=f"{symbol} {expiry}")
+        except NoDataFoundError:
+            print(f"  {symbol} {expiry}: 无期权数据，跳过")
+            continue
         raw = raw.assign(date=pd.to_datetime(raw["created"]).dt.date)
         rows = []
         for r in raw.itertuples():
@@ -119,6 +128,7 @@ def main():
     # 不可误报"sync 失败"（否则明天不再把该标的当 added，永久卡在 MAX(date) IS NULL）。
     from rnd import holdings_sync
     from server import pool
+    added_syms: list[str] = []   # 新纳入标的，回填延到增量之后串行派发（见文末，避免抢 ThetaData 会话）
     try:
         res = holdings_sync.sync(conn)
     except Exception as e:  # noqa: BLE001
@@ -130,11 +140,7 @@ def main():
         else:
             print(f"持仓同步: +{res['added']} -{res['removed']} pin={res['pinned']} "
                   f"拒={res['rejected']} 排除={res['excluded']} 错={res.get('gate_errors', [])}")
-            for sym in res["added"]:
-                try:
-                    _spawn_backfill(sym)
-                except Exception as e:  # noqa: BLE001
-                    print(f"  回填派发失败 {sym}（{type(e).__name__}: {e}）")
+            added_syms = res.get("added", [])
             try:
                 _notify_holdings(res)
             except Exception as e:  # noqa: BLE001
@@ -156,6 +162,8 @@ def main():
     if not symbols:
         print("无已落库标的可增量更新。")
         conn.close()
+        if added_syms:   # 仍要回填新标的（此路径无增量、ThetaData 空闲）
+            _spawn_backfill(added_syms)
         return
 
     lo = min(dt.date.fromisoformat(
@@ -164,7 +172,10 @@ def main():
     sofr = fetch.fetch_sofr_series(lo - dt.timedelta(days=7), today)
     print(f"EOD 增量更新 @ {today}")
     for sym in symbols:
-        update_symbol(conn, sym, sofr, today)
+        try:   # 单标的增量失败不中断其它标的，也不阻断后续 roll/push
+            update_symbol(conn, sym, sofr, today)
+        except Exception as e:  # noqa: BLE001
+            print(f"  {sym}: 增量更新失败，跳过（{type(e).__name__}: {str(e)[:120]}）")
     # roll 日重钉（spec §6）：自愈式，漏跑几天也会在下次运行补上
     from rnd.journal import roll_repin_check
     for r in roll_repin_check(conn):
@@ -180,6 +191,14 @@ def main():
         print(f"推送: 跳过（{e}）")
     except Exception as e:  # noqa: BLE001
         print(f"推送: 失败但不影响数据（{type(e).__name__}: {e}）")
+
+    # 新标的串行回填：放在增量+推送之后 spawn——此时主进程即将退出、ThetaData 空闲，
+    # backfill 独占单会话，不与增量并发抢连接（否则 Invalid session ID 崩）。
+    if added_syms:
+        try:
+            _spawn_backfill(added_syms)
+        except Exception as e:  # noqa: BLE001
+            print(f"  回填派发失败（{type(e).__name__}: {e}）")
     print("完成。")
 
 

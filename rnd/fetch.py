@@ -58,14 +58,22 @@ def fetch_underlying_close(symbol: str, date: dt.date) -> float:
 
 
 def stock_history_eod_chunked(symbol: str, start: dt.date, end: dt.date) -> pd.DataFrame:
-    """股票 EOD 范围请求实测上限 365 天，超出的窗口分块拼接。"""
+    """股票 EOD 范围请求实测上限 365 天，超出的窗口分块拼接。
+
+    单块无数据（上市前/停牌/整段无新交易日）跳过，全窗口无数据返回空 DataFrame——
+    由调用方按「空」优雅处理（backfill 跳过该标的、eod_update return 0），不冒泡崩溃。
+    持仓同步纳入的新标的常是近年上市（如 SNDK 2024 分拆），3 年窗口必然跨上市日。"""
+    from thetadata.errors import NoDataFoundError
     frames = []
     s = start
     while s <= end:
         e = min(s + dt.timedelta(days=350), end)
-        frames.append(_client().stock_history_eod(symbol=symbol, start_date=s, end_date=e))
+        try:
+            frames.append(_client().stock_history_eod(symbol=symbol, start_date=s, end_date=e))
+        except NoDataFoundError:
+            pass   # 该块无数据（上市前/停牌），跳过
         s = e + dt.timedelta(days=1)
-    return pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def latest_trading_day(symbol: str = "SPY") -> tuple[dt.date, float]:
