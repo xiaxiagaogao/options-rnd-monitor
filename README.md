@@ -51,6 +51,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 RND 是**数据描述，不构成投资建议**；风险中性概率 **≠** 真实概率。研究助手只读、不下单、不表方向。
 
+## 许可
+
+[MIT](LICENSE)
+
 ---
 
 🤖 与 [Claude Code](https://claude.com/claude-code) 结对开发。
