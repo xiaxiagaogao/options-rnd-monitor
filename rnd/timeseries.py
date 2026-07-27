@@ -29,8 +29,8 @@ def postprocess_symbol(conn, symbol: str):
         updates_term)
     conn.execute("UPDATE rnd_indicators SET pinned = 0, roll = 0 WHERE symbol = ?", (symbol,))
     conn.executemany(
-        f"UPDATE rnd_indicators SET pinned = 1 WHERE symbol = '{symbol}' AND date = ? AND expiry = ?",
-        updates_pin)
+        "UPDATE rnd_indicators SET pinned = 1 WHERE symbol = ? AND date = ? AND expiry = ?",
+        [(symbol, date, expiry) for date, expiry in updates_pin])
     # roll 日 = 钉住的到期与上一交易日不同（不打标会在换月日产生锯齿假信号）
     prev = None
     for date, expiry in updates_pin:

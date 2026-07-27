@@ -104,14 +104,27 @@ _MIGRATIONS = [
 ]
 
 
+_SCHEMA_READY: set[str] = set()   # 进程内已建表/迁移过的库，避免每次连接重跑整段 DDL
+
+
 def get_conn(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.executescript(DDL)
-    for table, col, typ in _MIGRATIONS:
-        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-        if col not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
-    conn.commit()
+    """WAL + busy_timeout：日终 eod_update 写库时 API 仍可读，不再 database is locked。
+
+    DDL 与迁移每进程每库只跑一次（原来每次连接都跑，纯属放大锁窗口）。
+    """
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    key = str(Path(db_path).resolve())
+    if key not in _SCHEMA_READY:
+        conn.executescript(DDL)
+        for table, col, typ in _MIGRATIONS:   # 表名/列名均为模块内常量，非外部输入
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        conn.commit()
+        _SCHEMA_READY.add(key)
     return conn
 
 

@@ -63,9 +63,9 @@ function renderMarkdown(md) {
 }
 
 async function api(path, opts = {}) {
+  // 会话只走 HttpOnly cookie（credentials: same-origin 自动带上）。
+  // 不再把 token 存 localStorage：那样任意 XSS 都能偷走 30 天会话。
   const headers = { "Content-Type": "application/json" };
-  const token = localStorage.getItem("rnd_token");
-  if (token) headers["X-Auth"] = token;
   // cache: no-store 避免切换标的时命中浏览器 GET 缓存造成错位
   const r = await fetch(path, { cache: "no-store", headers, credentials: "same-origin", ...opts });
   if (r.status === 401 && path !== "/api/login") throw { auth: true };
@@ -311,15 +311,14 @@ createApp({
     async doLogin() {
       this.loginErr = "";
       try {
-        const r = await api("/api/login", { method: "POST",
+        await api("/api/login", { method: "POST",
           body: JSON.stringify({ password: this.password }) });
-        if (r.token) localStorage.setItem("rnd_token", r.token);
         this.password = "";
         await this.boot();
       } catch (e) { this.loginErr = e.detail || "登录失败"; }
     },
     async doLogout() {
-      localStorage.removeItem("rnd_token");
+      localStorage.removeItem("rnd_token");   // 清掉旧版本残留，防止老会话继续躺在盘上
       await api("/api/logout", { method: "POST" });
       this.view = "login";
     },
