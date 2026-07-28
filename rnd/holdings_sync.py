@@ -2,6 +2,7 @@
 
 只读同机 fund.db（真金白银账本，绝不写）；本机无库 → no-op 降级。
 """
+import datetime as dt
 import os
 import sqlite3
 from pathlib import Path
@@ -33,6 +34,26 @@ def map_symbol(binance_symbol: str) -> str | None:
     return s[:-4]
 
 
+def _net_walk(rows) -> dict[tuple[str, str], dict]:
+    """共享净仓走查。rows 每项 (symbol, position_side, side, qty, price|None, fill_time|None)。
+
+    须按 fill_time 升序传入（当前持仓开仓时刻 open_ft 依赖顺序；仅判持有的 net 则与顺序无关）。
+    返回 {(symbol, position_side): {net, open_ft, open_price}}，只含当前净仓非0 的键。
+    BUY +qty / SELL -qty；净仓 0→非0 记开仓（时刻+价），平回 0 清标记（对齐基金 derive.go 判持有）。"""
+    st: dict[tuple[str, str], dict] = {}
+    for symbol, pos_side, side, qty, price, ft in rows:
+        key = (symbol, pos_side)
+        signed = qty if side == "BUY" else -qty
+        cur = st.get(key) or {"net": 0.0, "open_ft": None, "open_price": None}
+        if abs(cur["net"]) < HELD_EPS and abs(cur["net"] + signed) > HELD_EPS:
+            cur["open_ft"], cur["open_price"] = ft, price
+        cur["net"] += signed
+        if abs(cur["net"]) < HELD_EPS:
+            cur["open_ft"] = cur["open_price"] = None
+        st[key] = cur
+    return {k: v for k, v in st.items() if abs(v["net"]) > HELD_EPS}
+
+
 def derive_current_holdings(fund_db_path: str | Path = FUND_DB_PATH) -> set[str]:
     """读 fund.db binance_fills，按 (symbol,position_side) derive 净持仓。
     对齐基金 positions/derive.go：BUY +qty / SELL -qty，abs > 1e-9 判持有。
@@ -42,16 +63,50 @@ def derive_current_holdings(fund_db_path: str | Path = FUND_DB_PATH) -> set[str]
         return set()
     conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
     try:
-        rows = conn.execute(
-            "SELECT symbol, position_side, side, qty FROM binance_fills").fetchall()
+        rows = [(s, ps, sd, q, None, None) for s, ps, sd, q in conn.execute(
+            "SELECT symbol, position_side, side, qty FROM binance_fills").fetchall()]
     finally:
         conn.close()
-    net: dict[tuple[str, str], float] = {}
-    for symbol, pos_side, side, qty in rows:
-        signed = qty if side == "BUY" else -qty
-        key = (symbol, pos_side)
-        net[key] = net.get(key, 0.0) + signed
-    return {sym for (sym, _), n in net.items() if abs(n) > HELD_EPS}
+    return {sym for (sym, _) in _net_walk(rows)}
+
+
+def entry_dates(conn, fund_db_path: str | Path = FUND_DB_PATH) -> dict:
+    """每个当前持仓标的的开仓点（binance-entry-anchor spec §3.1）。只读 fund.db。
+
+    conn：rnd 库连接（用于把开仓日 snap 到最近有 RND 曲线的交易日）。
+    返回 {ticker: {open_date, rnd_date, entry_price}}：
+      open_date  当前持仓的开仓日（UTC 日历日，ISO）
+      rnd_date   ≤ open_date 的最近有 rnd_indicators 的交易日；无更早曲线 → None
+      entry_price 开那笔 fill 的成交价（币安代币化永续价，仅展示，不入 RND 计算）
+    fund.db 不存在 → {}。同一 ticker 多方向并存取净敞口更大者（v0 简化，见 spec §6）。"""
+    p = Path(fund_db_path)
+    if not p.exists():
+        return {}
+    fconn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    try:
+        rows = fconn.execute(
+            "SELECT symbol, position_side, side, qty, price, fill_time "
+            "FROM binance_fills ORDER BY fill_time").fetchall()
+    finally:
+        fconn.close()
+    out: dict[str, dict] = {}
+    for (symbol, _pos), st in _net_walk(rows).items():
+        ticker = map_symbol(symbol)
+        if ticker is None or st["open_ft"] is None:
+            continue
+        open_date = dt.datetime.fromtimestamp(
+            st["open_ft"] / 1000, dt.timezone.utc).date().isoformat()
+        row = conn.execute(
+            "SELECT MAX(date) FROM rnd_indicators WHERE symbol=? AND date<=?",
+            (ticker, open_date)).fetchone()
+        rnd_date = row[0] if row and row[0] else None
+        prev = out.get(ticker)
+        if prev is None or abs(st["net"]) > prev["_net"]:   # 多方向取净敞口更大者
+            out[ticker] = {"open_date": open_date, "rnd_date": rnd_date,
+                           "entry_price": st["open_price"], "_net": abs(st["net"])}
+    for v in out.values():
+        del v["_net"]
+    return out
 
 
 def resolve_holdings(fund_db_path: str | Path = FUND_DB_PATH) -> tuple[set[str], set[str]]:

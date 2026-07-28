@@ -409,10 +409,14 @@ createApp({
         name, type: "line", stack: "band", data, symbol: "none",
         lineStyle: { width: 0 }, areaStyle: { color, opacity: 1 }, emphasis: { disabled: true },
       });
+      const be = this.detail && this.detail.binance_entry;
       const marks = [
         ...f.roll_dates.map(d => ({ xAxis: d, label: { formatter: "●", color: "#6E6A60" } })),
         ...f.gate_fail_dates.map(d => ({ xAxis: d, label: { formatter: "▮", color: "#A33B2E" } })),
         ...f.bimodal_dates.map(d => ({ xAxis: d, label: { formatter: "◆", color: "#8F5C22" } })),
+        // 币安开仓竖线（binance-entry-anchor §3.4）：rnd_date 不在窗口内则 ECharts 不渲染，无害
+        ...(be && be.rnd_date ? [{ xAxis: be.rnd_date,
+              label: { formatter: "▲入场", color: "#2F6B8F", fontSize: 10 } }] : []),
       ];
       const frozenLines = f.frozen.map(fr => ({
         yAxis: fr.level,
@@ -514,14 +518,21 @@ createApp({
       const d = this.detail;
       if (!d) return;
       let otherDate = null, label = "";
+      const be = d.binance_entry;
       if (this.cmpMode === "entry" && this.myPosition) {
+        // journal 持仓优先（有意识下注，权威）
         otherDate = this.myPosition.event_date;
         label = `入场日 ${otherDate}（虚）vs 今日（实）`;
+      } else if (this.cmpMode === "entry" && be && be.rnd_date) {
+        // 无 journal 条目但币安有持仓：用币安开仓日兜底
+        otherDate = be.rnd_date;
+        label = `币安开仓 ${be.open_date}（虚）vs 今日（实）`;
       } else {
         const f = this.fanData;
         otherDate = f && f.dates.length > 1 ? f.dates[f.dates.length - 2] : null;
         label = otherDate ? `${otherDate}（虚）vs 今日（实）` : "";
-        if (this.cmpMode === "entry") label = "无持仓 · 退回 昨 vs 今";
+        if (this.cmpMode === "entry")
+          label = (be ? "币安开仓早于数据窗口 · " : "无持仓 · ") + "退回 昨 vs 今";
       }
       if (this._stale(seq)) return;
       this.cmpLabel = label;

@@ -137,11 +137,15 @@ def symbol_detail(symbol: str) -> dict:
     gate_detail = json.loads(ind["gate_detail"]) if ind.get("gate_detail") else {}
     modes = json.loads(ind["modes_json"]) if ind.get("modes_json") else []
     pos = open_positions(c, symbol)
+    # 币安开仓点（binance-entry-anchor spec §3.2）：只读 fund.db 现算，缺库/未持有 → None
+    from rnd import holdings_sync
+    binance_entry = holdings_sync.entry_dates(c).get(symbol)
     c.close()
     return {
         "symbol": symbol, "date": d, "benchmark": bench,
         "indicators": ind, "gate_detail": gate_detail, "modes": modes,
         "expiries": expiries, "states": states, "positions": pos,
+        "binance_entry": binance_entry,
     }
 
 
