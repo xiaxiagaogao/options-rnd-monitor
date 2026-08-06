@@ -145,7 +145,7 @@ def symbol_detail(symbol: str) -> dict:
     # 现查历史指标（历史行稳定，等价于冻结；管线若重算历史会跟着变，属可接受）。
     if binance_entry and binance_entry.get("rnd_date"):
         binance_entry["frozen"] = _row(
-            c, "SELECT date, q05, q25, q50, sigma1_abs FROM rnd_indicators"
+            c, "SELECT date, q05, q25, q50, q75, q95, sigma1_abs FROM rnd_indicators"
                " WHERE symbol=? AND date=? AND pinned=1",
             (symbol, binance_entry["rnd_date"]))
     c.close()

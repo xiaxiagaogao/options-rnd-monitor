@@ -445,6 +445,17 @@ createApp({
         label: { formatter: `冻结 ${fr.stop_q.toUpperCase()} ${fr.level.toFixed(1)}`, position: "insideEndTop", fontSize: 10 },
         lineStyle: { color: "#26241F", type: "solid", width: 2 },
       }));
+      // 币安持仓：把入场日那天的五档分位钉成细横线，看清"我建仓时的分布"与之后的漂移。
+      // 细线 + 低对比度，不与扇形带抢视觉；Q50 略深以便一眼定位中枢。
+      const beFrozen = (be && be.frozen) ? [
+        ["q95", "#B3AFA4"], ["q75", "#A8A396"], ["q50", "#6E6A60"],
+        ["q25", "#A8A396"], ["q05", "#B3AFA4"],
+      ].filter(([q]) => be.frozen[q] != null).map(([q, color]) => ({
+        yAxis: be.frozen[q],
+        label: { formatter: `入场 ${q.toUpperCase()} ${be.frozen[q].toFixed(1)}`,
+                 position: "insideStartTop", fontSize: 9, color },
+        lineStyle: { color, type: "solid", width: 1 },
+      })) : [];
       const ys = [...closes.filter(v => v != null), ...f.q.q05, ...f.q.q95];
       this.chart("fanChart")?.setOption({
         animation: false,
@@ -463,7 +474,7 @@ createApp({
           { name: "收盘", type: "line", data: closes, symbol: "none",
             lineStyle: { width: 1.8, color: "#2F6B8F" },
             markLine: { symbol: "none", silent: true,
-                        data: [...frozenLines, ...marks],
+                        data: [...beFrozen, ...frozenLines, ...marks],
                         lineStyle: { color: "#B3AFA4", type: "dotted" } } },
         ],
       }, true);
