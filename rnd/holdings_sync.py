@@ -34,22 +34,53 @@ def map_symbol(binance_symbol: str) -> str | None:
     return s[:-4]
 
 
-def _net_walk(rows) -> dict[tuple[str, str], dict]:
-    """共享净仓走查。rows 每项 (symbol, position_side, side, qty, price|None, fill_time|None)。
+def _sign(x: float) -> int:
+    return (x > 0) - (x < 0)
 
-    须按 fill_time 升序传入（当前持仓开仓时刻 open_ft 依赖顺序；仅判持有的 net 则与顺序无关）。
-    返回 {(symbol, position_side): {net, open_ft, open_price}}，只含当前净仓非0 的键。
-    BUY +qty / SELL -qty；净仓 0→非0 记开仓（时刻+价），平回 0 清标记（对齐基金 derive.go 判持有）。"""
+
+def _blank_cycle() -> dict:
+    return {"net": 0.0, "entry_qty": 0.0, "entry_quote": 0.0,
+            "entry_time": None, "num_opening": 0}
+
+
+def _walk_cycles(rows) -> dict[tuple[str, str], dict]:
+    """持仓周期走查。**口径对齐 fund-dashboard `backend/positions/derive.go`**——
+    两个面板必须给出同一个开仓均价，否则用户会看到两套数字打架。
+
+    rows 每项 (symbol, position_side, side, qty, quote_qty|None, fill_time|None)，
+    须按 fill_time 升序。返回 {(symbol, position_side): 周期状态}，只含走查结束时
+    仍未平（net != 0）的周期 —— 即**当前持仓**。
+
+    规则（逐条对应 derive.go）：
+      · 开仓/加仓：进 entry 腿，按 quote 金额累加 → 均价 = entry_quote / entry_qty
+        （所以低位加仓会摊低均价，与币安 App 的 Entry Price 一致）
+      · 部分平仓：只减净仓，**不改均价**（平仓腿在 derive.go 里单独累计，此处不需要）
+      · 净仓归零：周期结束，状态清空（再开则是全新周期）
+      · 单笔跨零翻向：按数量比例切分，剩余部分开新周期
+    """
     st: dict[tuple[str, str], dict] = {}
-    for symbol, pos_side, side, qty, price, ft in rows:
+    for symbol, pos_side, side, qty, quote, ft in rows:
         key = (symbol, pos_side)
         signed = qty if side == "BUY" else -qty
-        cur = st.get(key) or {"net": 0.0, "open_ft": None, "open_price": None}
-        if abs(cur["net"]) < HELD_EPS and abs(cur["net"] + signed) > HELD_EPS:
-            cur["open_ft"], cur["open_price"] = ft, price
-        cur["net"] += signed
-        if abs(cur["net"]) < HELD_EPS:
-            cur["open_ft"] = cur["open_price"] = None
+        cur = st.get(key) or _blank_cycle()
+        if cur["net"] == 0 or _sign(cur["net"]) == _sign(signed):
+            if cur["entry_qty"] == 0:          # 周期起点
+                cur["entry_time"] = ft
+            cur["entry_qty"] += qty
+            cur["entry_quote"] += quote or 0.0
+            cur["num_opening"] += 1
+            cur["net"] += signed
+        elif abs(signed) <= abs(cur["net"]) + HELD_EPS:
+            cur["net"] += signed               # 平仓：均价不动
+            if abs(cur["net"]) < HELD_EPS:
+                cur = _blank_cycle()
+        else:                                   # 跨零翻向：切分
+            close_qty = abs(cur["net"])
+            frac = close_qty / qty if qty else 0.0
+            cur = {"net": cur["net"] + signed,
+                   "entry_qty": qty - close_qty,
+                   "entry_quote": (quote or 0.0) * (1 - frac),
+                   "entry_time": ft, "num_opening": 1}
         st[key] = cur
     return {k: v for k, v in st.items() if abs(v["net"]) > HELD_EPS}
 
@@ -64,20 +95,25 @@ def derive_current_holdings(fund_db_path: str | Path = FUND_DB_PATH) -> set[str]
     conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
     try:
         rows = [(s, ps, sd, q, None, None) for s, ps, sd, q in conn.execute(
-            "SELECT symbol, position_side, side, qty FROM binance_fills").fetchall()]
+            "SELECT symbol, position_side, side, qty FROM binance_fills"
+            " ORDER BY rowid").fetchall()]
     finally:
         conn.close()
-    return {sym for (sym, _) in _net_walk(rows)}
+    return {sym for (sym, _) in _walk_cycles(rows)}
 
 
 def entry_dates(conn, fund_db_path: str | Path = FUND_DB_PATH) -> dict:
     """每个当前持仓标的的开仓点（binance-entry-anchor spec §3.1）。只读 fund.db。
 
     conn：rnd 库连接（用于把开仓日 snap 到最近有 RND 曲线的交易日）。
-    返回 {ticker: {open_date, rnd_date, entry_price}}：
-      open_date  当前持仓的开仓日（UTC 日历日，ISO）
-      rnd_date   ≤ open_date 的最近有 rnd_indicators 的交易日；无更早曲线 → None
-      entry_price 开那笔 fill 的成交价（币安代币化永续价，仅展示，不入 RND 计算）
+    返回 {ticker: {open_date, rnd_date, entry_price, qty, num_opening_fills}}：
+      open_date   当前持仓周期的起始日（净仓由 0 转非 0 那笔，UTC 日历日 ISO）
+      rnd_date    ≤ open_date 的最近有 rnd_indicators 的交易日；无更早曲线 → None
+      entry_price **quote 加权平均开仓价**（口径同 fund 看板与币安 App 的 Entry
+                  Price：低位加仓会摊低，部分平仓不改）。代币化永续价，仅展示，
+                  不入 RND 计算。
+      qty         当前净仓（带方向符号）
+      num_opening_fills 本周期开仓笔数（>1 表示均价是多笔加权出来的）
     fund.db 不存在 → {}。同一 ticker 多方向并存取净敞口更大者（v0 简化，见 spec §6）。"""
     p = Path(fund_db_path)
     if not p.exists():
@@ -85,27 +121,29 @@ def entry_dates(conn, fund_db_path: str | Path = FUND_DB_PATH) -> dict:
     fconn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
     try:
         rows = fconn.execute(
-            "SELECT symbol, position_side, side, qty, price, fill_time "
+            "SELECT symbol, position_side, side, qty, quote_qty, fill_time "
             "FROM binance_fills ORDER BY fill_time").fetchall()
     finally:
         fconn.close()
     out: dict[str, dict] = {}
-    for (symbol, _pos), st in _net_walk(rows).items():
+    for (symbol, _pos), st in _walk_cycles(rows).items():
         ticker = map_symbol(symbol)
-        if ticker is None or st["open_ft"] is None:
+        if ticker is None or st["entry_time"] is None or st["entry_qty"] <= 0:
             continue
         open_date = dt.datetime.fromtimestamp(
-            st["open_ft"] / 1000, dt.timezone.utc).date().isoformat()
+            st["entry_time"] / 1000, dt.timezone.utc).date().isoformat()
         row = conn.execute(
             "SELECT MAX(date) FROM rnd_indicators WHERE symbol=? AND date<=?",
             (ticker, open_date)).fetchone()
-        rnd_date = row[0] if row and row[0] else None
         prev = out.get(ticker)
-        if prev is None or abs(st["net"]) > prev["_net"]:   # 多方向取净敞口更大者
-            out[ticker] = {"open_date": open_date, "rnd_date": rnd_date,
-                           "entry_price": st["open_price"], "_net": abs(st["net"])}
-    for v in out.values():
-        del v["_net"]
+        if prev is None or abs(st["net"]) > abs(prev["qty"]):   # 多方向取净敞口更大者
+            out[ticker] = {
+                "open_date": open_date,
+                "rnd_date": row[0] if row and row[0] else None,
+                "entry_price": st["entry_quote"] / st["entry_qty"],
+                "qty": st["net"],
+                "num_opening_fills": st["num_opening"],
+            }
     return out
 
 

@@ -29,15 +29,18 @@ def ms(datestr: str) -> int:
 
 
 def make_fund_db(fills):
-    """fills: list of (symbol, position_side, side, qty, price, 'YYYY-MM-DD')。返回临时路径。"""
+    """fills: list of (symbol, position_side, side, qty, price, 'YYYY-MM-DD')。返回临时路径。
+
+    quote_qty 按 qty*price 算（与币安一致），均价即按它加权。"""
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE binance_fills "
-                 "(symbol TEXT, position_side TEXT, side TEXT, qty REAL, price REAL, fill_time INTEGER)")
+                 "(symbol TEXT, position_side TEXT, side TEXT, qty REAL, price REAL, "
+                 " quote_qty REAL, fill_time INTEGER)")
     conn.executemany(
-        "INSERT INTO binance_fills VALUES (?,?,?,?,?,?)",
-        [(s, ps, sd, q, pr, ms(d)) for s, ps, sd, q, pr, d in fills])
+        "INSERT INTO binance_fills VALUES (?,?,?,?,?,?,?)",
+        [(s, ps, sd, q, pr, q * pr, ms(d)) for s, ps, sd, q, pr, d in fills])
     conn.commit()
     conn.close()
     return path
@@ -71,15 +74,65 @@ def test_single_open():
 
 
 def test_scale_in():
-    print("\n[加仓：open_date 取首次 0→非0]")
+    print("\n[加仓：open_date 取首次 0→非0，均价按 quote 加权]")
     db = make_fund_db([
         ("MUUSDT", "LONG", "BUY", 0.05, 100.0, "2026-06-23"),
         ("MUUSDT", "LONG", "BUY", 0.08, 110.0, "2026-07-08")])
     c = rnd_conn(TRADING_DAYS)
     res = holdings_sync.entry_dates(c, fund_db_path=db)
     os.unlink(db)
-    check("open_date = 首笔", res.get("MU", {}).get("open_date") == "2026-06-23",
-          res.get("MU", {}).get("open_date"))
+    e = res.get("MU", {})
+    check("open_date = 首笔", e.get("open_date") == "2026-06-23", e.get("open_date"))
+    # (0.05*100 + 0.08*110) / 0.13 = 13.8/0.13 = 106.153…
+    check("均价 = quote 加权（非首笔价）", abs(e.get("entry_price", 0) - 106.1538) < 1e-3,
+          e.get("entry_price"))
+    check("记录开仓笔数", e.get("num_opening_fills") == 2, e.get("num_opening_fills"))
+    check("净仓 = 累计", abs(e.get("qty", 0) - 0.13) < 1e-9, e.get("qty"))
+
+
+def test_average_down():
+    print("\n[摊低：低买拉低均价（用户实测场景）]")
+    db = make_fund_db([
+        ("NVDAUSDT", "LONG", "BUY", 1.0, 215.50, "2026-05-14"),
+        ("NVDAUSDT", "LONG", "BUY", 1.0, 180.50, "2026-06-23")])
+    c = rnd_conn(TRADING_DAYS + [("NVDA", d) for _, d in TRADING_DAYS])
+    res = holdings_sync.entry_dates(c, fund_db_path=db)
+    os.unlink(db)
+    e = res.get("NVDA", {})
+    check("均价被摊低到 198.0（非首笔 215.5）", abs(e.get("entry_price", 0) - 198.0) < 1e-6,
+          e.get("entry_price"))
+    check("open_date 仍是持仓起始日", e.get("open_date") == "2026-05-14", e.get("open_date"))
+
+
+def test_partial_close_keeps_avg():
+    print("\n[部分平仓：不改均价（只减仓）]")
+    db = make_fund_db([
+        ("MUUSDT", "LONG", "BUY", 1.0, 100.0, "2026-05-14"),
+        ("MUUSDT", "LONG", "BUY", 1.0, 80.0, "2026-06-23"),   # 均价 90
+        ("MUUSDT", "LONG", "SELL", 1.0, 85.0, "2026-07-08")])  # 平一半
+    c = rnd_conn(TRADING_DAYS)
+    res = holdings_sync.entry_dates(c, fund_db_path=db)
+    os.unlink(db)
+    e = res.get("MU", {})
+    check("均价仍为 90（部分平仓不改）", abs(e.get("entry_price", 0) - 90.0) < 1e-6,
+          e.get("entry_price"))
+    check("净仓剩 1.0", abs(e.get("qty", 0) - 1.0) < 1e-9, e.get("qty"))
+    check("open_date 仍是周期起点", e.get("open_date") == "2026-05-14", e.get("open_date"))
+
+
+def test_reopen_resets_avg():
+    print("\n[平掉再开：均价与起始日都重置]")
+    db = make_fund_db([
+        ("MUUSDT", "LONG", "BUY", 1.0, 100.0, "2026-05-14"),
+        ("MUUSDT", "LONG", "SELL", 1.0, 105.0, "2026-06-23"),  # 平回 0
+        ("MUUSDT", "LONG", "BUY", 2.0, 50.0, "2026-07-08")])   # 新周期
+    c = rnd_conn(TRADING_DAYS)
+    res = holdings_sync.entry_dates(c, fund_db_path=db)
+    os.unlink(db)
+    e = res.get("MU", {})
+    check("均价 = 新周期的 50", abs(e.get("entry_price", 0) - 50.0) < 1e-6, e.get("entry_price"))
+    check("open_date = 新周期起点", e.get("open_date") == "2026-07-08", e.get("open_date"))
+    check("开仓笔数重置为 1", e.get("num_opening_fills") == 1, e.get("num_opening_fills"))
 
 
 def test_reopen():
@@ -144,7 +197,8 @@ def test_missing_db():
     check("返回空 dict", res == {}, list(res))
 
 
-for fn in (test_single_open, test_scale_in, test_reopen, test_closed_excluded,
+for fn in (test_single_open, test_scale_in, test_average_down, test_partial_close_keeps_avg,
+           test_reopen_resets_avg, test_reopen, test_closed_excluded,
            test_snap_weekend, test_snap_before_data, test_blacklist_filtered, test_missing_db):
     fn()
 

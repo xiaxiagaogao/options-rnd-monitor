@@ -140,6 +140,14 @@ def symbol_detail(symbol: str) -> dict:
     # 币安开仓点（binance-entry-anchor spec §3.2）：只读 fund.db 现算，缺库/未持有 → None
     from rnd import holdings_sync
     binance_entry = holdings_sync.entry_dates(c).get(symbol)
+    # 入场日那天的分位快照——让币安持仓也能像 journal 一样出「冻结 vs 实时 vs 偏移」。
+    # 与 journal 的差别：journal 的 frozen_* 是入库即冻的不可变列，这里是按 rnd_date
+    # 现查历史指标（历史行稳定，等价于冻结；管线若重算历史会跟着变，属可接受）。
+    if binance_entry and binance_entry.get("rnd_date"):
+        binance_entry["frozen"] = _row(
+            c, "SELECT date, q05, q25, q50, sigma1_abs FROM rnd_indicators"
+               " WHERE symbol=? AND date=? AND pinned=1",
+            (symbol, binance_entry["rnd_date"]))
     c.close()
     return {
         "symbol": symbol, "date": d, "benchmark": bench,

@@ -115,6 +115,26 @@ createApp({
     },
     // 币安实际敞口（持仓同步派生，非 journal 手动轨）。两轨并存时 journal 优先展示。
     binanceEntry() { return (this.detail && this.detail.binance_entry) || null; },
+    // 入场日分位 → 今日分位的位移，按今日 σ1 归一（口径与 journal 的 offsetSigma 一致）
+    beOffset() {
+      const be = this.binanceEntry, i = this.ind;
+      if (!be || !be.frozen || !i || !i.sigma1_abs) return null;
+      const f = q => {
+        const off = (i[q] - be.frozen[q]) / i.sigma1_abs;
+        return (off >= 0 ? "+" : "") + off.toFixed(2) + "σ";
+      };
+      return { q05: f("q05"), q25: f("q25") };
+    },
+    // 事实陈述：今日收盘是否已跌破入场日 Q05（多头口径；净仓为负则反向）。
+    // 注意与 journal 的语义差别——这里没有"你承诺过的失效线"，只是描述位置。
+    beBreached() {
+      const be = this.binanceEntry;
+      if (!be || !be.frozen || !this.fanData) return false;
+      const dates = this.fanData.dates;
+      const close = this.fanData.close[dates[dates.length - 1]];
+      if (close == null) return false;
+      return be.qty >= 0 ? close < be.frozen.q05 : close > be.frozen.q05;
+    },
     frozenStop() {
       const p = this.myPosition;
       return p ? p["frozen_" + p.stop_q] : null;

@@ -301,6 +301,10 @@
                   <span class="lamp" :class="stopBreached ? 'bad':'ok'"></span>
                   <span :style="{color: stopBreached ? '#A33B2E':'#3E7A52', fontWeight:600, fontSize:'12px'}">
                     {{ stopBreached ? '收盘确认失效！' : '未触发' }}</span></span>
+                <span v-else-if="binanceEntry && binanceEntry.frozen" class="gate-mini">
+                  <span class="lamp" :class="beBreached ? 'bad':'ok'"></span>
+                  <span :style="{color: beBreached ? '#A33B2E':'#3E7A52', fontWeight:600, fontSize:'12px'}">
+                    {{ beBreached ? '已跌破入场日 Q05' : '未跌破 Q05' }}</span></span>
               </div>
               <template v-if="myPosition">
                 <div class="muted" style="font-size:12px">
@@ -321,12 +325,38 @@
                 </div>
               </template>
               <template v-else>
-                <div v-if="binanceEntry" class="muted" style="font-size:12px">
-                  币安持仓 · 开仓 {{ binanceEntry.open_date }} @ {{ fmt(binanceEntry.entry_price,1) }}
-                  <span class="annot">（持仓同步派生 · 代币化永续成交价）</span>
-                </div>
-                <div class="annot" style="margin-bottom:8px">
-                  {{ binanceEntry ? '未录入 journal · 录入后冻结当日分位快照（永不重画）'
+                <template v-if="binanceEntry">
+                  <div class="muted" style="font-size:12px">
+                    {{ binanceEntry.qty >= 0 ? '多' : '空' }} {{ detail.symbol }} ·
+                    入场 {{ binanceEntry.open_date }} @ {{ fmt(binanceEntry.entry_price,1) }} ·
+                    币安实际持仓
+                  </div>
+                  <template v-if="binanceEntry.frozen && beOffset">
+                    <div class="trio">
+                      <div><div class="tname">冻结 Q05</div>
+                        <div class="tval">{{ fmt(binanceEntry.frozen.q05,1) }}</div></div>
+                      <div><div class="tname">实时 Q05</div>
+                        <div class="tval">{{ fmt(ind.q05,1) }}</div></div>
+                      <div><div class="tname">偏移量</div>
+                        <div class="tval">{{ beOffset.q05 }}</div></div>
+                    </div>
+                    <div class="trio">
+                      <div><div class="tname">冻结 Q25</div>
+                        <div class="tval">{{ fmt(binanceEntry.frozen.q25,1) }}</div></div>
+                      <div><div class="tname">实时 Q25</div>
+                        <div class="tval">{{ fmt(ind.q25,1) }}</div></div>
+                      <div><div class="tname">偏移量</div>
+                        <div class="tval">{{ beOffset.q25 }}</div></div>
+                    </div>
+                  </template>
+                  <div v-else class="annot">入场日无钉住行（该日闸门未过），无法给出冻结分位</div>
+                  <div class="annot" style="border-top:1px dashed #E4E1D9;padding-top:6px">
+                    净仓 {{ binanceEntry.qty }} · {{ binanceEntry.num_opening_fills }} 笔加权均价 ·
+                    冻结分位取入场日 {{ binanceEntry.rnd_date }}
+                  </div>
+                </template>
+                <div class="annot" style="margin:8px 0">
+                  {{ binanceEntry ? '以下可另录 journal（手动轨：记下你的身份与止损理由）'
                                   : '无持仓 · 录入后冻结当日分位快照（永不重画）' }}</div>
                 <div class="form">
                   <select v-model="form.direction"><option value="long">多</option><option value="short">空</option></select>
