@@ -237,6 +237,8 @@
             <span class="seg">{{ ind.n_modes>=2 ? '双峰 ◆' : '单峰' }}</span>
             <span class="seg" v-if="myPosition">持仓 · 冻结 {{ myPosition.stop_q.toUpperCase() }}
               {{ fmt(frozenStop,1) }} · 偏移 <b>{{ offsetSigma }}</b></span>
+            <span class="seg" v-else-if="binanceEntry">币安持仓 · 开仓 {{ binanceEntry.open_date.slice(5) }}
+              @ <b>{{ fmt(binanceEntry.entry_price,1) }}</b></span>
             <span class="seg" v-else>无持仓</span>
             <span class="seg faint">EOD · 次日 07:00 JST 更新</span>
           </div>
@@ -319,7 +321,13 @@
                 </div>
               </template>
               <template v-else>
-                <div class="annot" style="margin-bottom:8px">无持仓 · 录入后冻结当日分位快照（永不重画）</div>
+                <div v-if="binanceEntry" class="muted" style="font-size:12px">
+                  币安持仓 · 开仓 {{ binanceEntry.open_date }} @ {{ fmt(binanceEntry.entry_price,1) }}
+                  <span class="annot">（持仓同步派生 · 代币化永续成交价）</span>
+                </div>
+                <div class="annot" style="margin-bottom:8px">
+                  {{ binanceEntry ? '未录入 journal · 录入后冻结当日分位快照（永不重画）'
+                                  : '无持仓 · 录入后冻结当日分位快照（永不重画）' }}</div>
                 <div class="form">
                   <select v-model="form.direction"><option value="long">多</option><option value="short">空</option></select>
                   <select v-model="form.identity">

@@ -113,6 +113,8 @@ createApp({
     myPosition() {
       return this.detail && this.detail.positions.length ? this.detail.positions[0] : null;
     },
+    // 币安实际敞口（持仓同步派生，非 journal 手动轨）。两轨并存时 journal 优先展示。
+    binanceEntry() { return (this.detail && this.detail.binance_entry) || null; },
     frozenStop() {
       const p = this.myPosition;
       return p ? p["frozen_" + p.stop_q] : null;
