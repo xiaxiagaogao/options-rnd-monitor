@@ -355,9 +355,10 @@
                     冻结分位取入场日 {{ binanceEntry.rnd_date }}
                   </div>
                 </template>
-                <div class="annot" style="margin:8px 0">
-                  {{ binanceEntry ? '以下可另录 journal（手动轨：记下你的身份与止损理由）'
-                                  : '无持仓 · 录入后冻结当日分位快照（永不重画）' }}</div>
+                <!-- journal 手动轨：仅在既无 journal 持仓、也无 fund 持仓时出现。
+                     持仓口径以 fund 同步为准，二者只留其一，避免两套入场价并存。 -->
+                <template v-if="!binanceEntry">
+                <div class="annot" style="margin-bottom:8px">无持仓 · 录入后冻结当日分位快照（永不重画）</div>
                 <div class="form">
                   <select v-model="form.direction"><option value="long">多</option><option value="short">空</option></select>
                   <select v-model="form.identity">
@@ -370,6 +371,7 @@
                   <button class="btn" @click="openPosition">录入入场（冻结）</button>
                 </div>
                 <div class="login-err" v-if="journalErr">{{ journalErr }}</div>
+                </template>
               </template>
             </div>
           </div>
