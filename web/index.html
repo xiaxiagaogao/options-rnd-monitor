@@ -351,7 +351,7 @@
                   </template>
                   <div v-else class="annot">入场日无钉住行（该日闸门未过），无法给出冻结分位</div>
                   <div class="annot" style="border-top:1px dashed #E4E1D9;padding-top:6px">
-                    净仓 {{ binanceEntry.qty }} · {{ binanceEntry.num_opening_fills }} 笔加权均价 ·
+                    净仓 {{ +binanceEntry.qty.toFixed(6) }} · {{ binanceEntry.num_opening_fills }} 笔加权均价 ·
                     冻结分位取入场日 {{ binanceEntry.rnd_date }}
                   </div>
                 </template>
