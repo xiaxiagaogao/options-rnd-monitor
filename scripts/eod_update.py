@@ -120,7 +120,9 @@ def update_symbol(conn, symbol: str, sofr: pd.Series, today: dt.date) -> int:
 
 
 def main():
-    today = dt.date.today()
+    # 增量窗口的"今天"取美东（VPS 在 +08，本机日期是美东的明天 → ThetaData 拒收未来
+    # end_date，2026-09-01 事故根因）。回填日志文件名仍用本机日期，无关口径。
+    today = fetch.market_today()
     conn = db.get_conn()
 
     # 持仓同步（holdings-sync）：先跑，用最新持仓驱动池。失败不阻断数据。
