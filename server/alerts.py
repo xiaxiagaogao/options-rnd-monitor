@@ -73,6 +73,31 @@ def todays_anomalies(symbols: list[str] | None = None) -> list[dict]:
     return items
 
 
+def stale_symbols(symbols: list[str], vendor_latest: str) -> list[tuple[str, str | None]]:
+    """库内最新数据日落后数据源的标的 → [(symbol, 库内最新数据日 or None)]。
+
+    基准取 ThetaData 已出 EOD 的最近交易日（`fetch.latest_trading_day`），不自维护
+    交易日历/假期表：周末跑时基准就是周五，与库内相等即不算陈旧。
+    """
+    c = q.conn()
+    out = [(sym, d) for sym in symbols
+           if (d := q.latest_date(c, sym)) is None or d < vendor_latest]
+    c.close()
+    return out
+
+
+def format_staleness(stale: list[tuple[str, str | None]], vendor_latest: str,
+                     n_total: int) -> str:
+    """陈旧告警推送体（2026-09-01 事故：拉取全挂而推送照常发旧报告，静默两天）。"""
+    lines = "\n".join(f"· {sym} 停在 {d}" if d else f"· {sym} 无数据" for sym, d in stale)
+    tail = ("今日不推异动与市场展望——旧数据不当新数据发。\n去 VPS 看 eod.log 排查。"
+            if len(stale) >= n_total else
+            "以上标的今日读数缺失；其余标的照常推送。")
+    return (f"⚠ RND 数据陈旧 · 未更新\n{'—' * 20}\n"
+            f"数据源最近交易日：{vendor_latest}\n"
+            f"落后标的 {len(stale)}/{n_total}：\n{lines}\n\n{tail}")
+
+
 def format_alerts(items: list[dict], asof: str | None = None) -> str:
     """异动项 → TG 纯文本推送体。无异动返回空串（调用方据此决定不推）。"""
     if not items:
