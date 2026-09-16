@@ -19,12 +19,14 @@ import pandas as pd
 
 from thetadata.errors import NoDataFoundError
 
-from rnd import db, fetch
+from rnd import config, db, fetch
 from rnd.compute import ComputeError, compute_day
 from rnd.timeseries import postprocess_symbol
 from rnd.pipeline.clean import quality_flags
 
 INDEX_LIKE = {"SPY", "QQQ"}          # 尾部概率口径：指数 ±5%，个股 ±10%（spec §4）
+DTE_MIN = config.EXPIRY["dte_min"]   # 拉取窗口的真正闸门（不是 symbols.yaml 的装饰位）
+DTE_MAX = config.EXPIRY["dte_max"]
 
 
 def with_retry(fn, tries=4, base=5, label=""):
@@ -59,12 +61,12 @@ def ingest_symbol(conn, symbol: str, start: dt.date, end: dt.date, sofr: pd.Seri
     listed = set(exp_dates)
     monthlies = [e for e in exp_dates
                  if fetch.is_monthly(e, listed)
-                 and start + dt.timedelta(days=7) <= e <= end + dt.timedelta(days=60)]
+                 and start + dt.timedelta(days=DTE_MIN) <= e <= end + dt.timedelta(days=DTE_MAX)]
     print(f"  {symbol}: {len(monthlies)} 个月度到期，交易日历 {len(calendar)} 天")
 
     for n, expiry in enumerate(monthlies, 1):
-        s = max(expiry - dt.timedelta(days=60), start)
-        e = min(expiry - dt.timedelta(days=7), end)
+        s = max(expiry - dt.timedelta(days=DTE_MAX), start)
+        e = min(expiry - dt.timedelta(days=DTE_MIN), end)
         if s > e:
             continue
         # 续跑：该到期在窗口内的最后交易日已入库则跳过拉取

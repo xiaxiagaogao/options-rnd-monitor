@@ -11,6 +11,6 @@ pinned:
 # 到期日规则（spec §1）
 expiry:
   monthly_only: true
-  dte_min: 7
+  dte_min: 2
   dte_max: 60
   count: 2
