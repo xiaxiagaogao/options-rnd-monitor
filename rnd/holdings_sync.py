@@ -44,19 +44,25 @@ def _blank_cycle() -> dict:
 
 
 def _walk_cycles(rows) -> dict[tuple[str, str], dict]:
-    """持仓周期走查。**口径对齐 fund-dashboard `backend/positions/derive.go`**——
-    两个面板必须给出同一个开仓均价，否则用户会看到两套数字打架。
+    """持仓周期走查。**开仓均价口径 = 币安 PositionRisk / App 的 Entry Price**。
+
+    fund-dashboard 的开仓视图直接展示币安 PositionRisk 原值（orchestrator.go
+    `buildOpenViews`），所以对齐目标是币安本身。**不是 derive.go**：derive.go 的
+    「全部开仓腿 quote / 全部开仓量」只用于已平仓的来回；拿它算当前持仓，一旦
+    「减仓后再加仓」，已卖掉的旧仓还留在分母里，把补仓价稀释掉。
 
     rows 每项 (symbol, position_side, side, qty, quote_qty|None, fill_time|None)，
-    须按 fill_time 升序。返回 {(symbol, position_side): 周期状态}，只含走查结束时
-    仍未平（net != 0）的周期 —— 即**当前持仓**。
+    须按成交顺序升序。返回 {(symbol, position_side): 周期状态}，只含走查结束时
+    仍未平（net != 0）的周期 —— 即**当前持仓**。entry_qty 恒等于 |net|，
+    entry_quote 是剩余仓位的持仓成本，均价 = entry_quote / entry_qty。
 
-    规则（逐条对应 derive.go）：
-      · 开仓/加仓：进 entry 腿，按 quote 金额累加 → 均价 = entry_quote / entry_qty
-        （所以低位加仓会摊低均价，与币安 App 的 Entry Price 一致）
-      · 部分平仓：只减净仓，**不改均价**（平仓腿在 derive.go 里单独累计，此处不需要）
+    规则：
+      · 开仓/加仓：成本 += quote 金额（低位加仓摊低均价）
+      · 部分平仓：成本与数量按剩余比例同缩 → **均价不变**；之后再加仓按
+        「剩余量 × 旧均价 + 新加仓金额」加权
       · 净仓归零：周期结束，状态清空（再开则是全新周期）
-      · 单笔跨零翻向：按数量比例切分，剩余部分开新周期
+      · 单笔跨零翻向：按数量比例切分，新周期只含翻过去的那部分
+      · entry_time（周期起点，冻结分位的锚）只在净仓 0 → 非 0 时设定，减仓不动它
     """
     st: dict[tuple[str, str], dict] = {}
     for symbol, pos_side, side, qty, quote, ft in rows:
@@ -71,9 +77,14 @@ def _walk_cycles(rows) -> dict[tuple[str, str], dict]:
             cur["num_opening"] += 1
             cur["net"] += signed
         elif abs(signed) <= abs(cur["net"]) + HELD_EPS:
-            cur["net"] += signed               # 平仓：均价不动
-            if abs(cur["net"]) < HELD_EPS:
+            remain = abs(cur["net"] + signed)  # 平仓：成本按剩余比例缩，均价不动
+            if remain < HELD_EPS:
                 cur = _blank_cycle()
+            else:
+                keep = remain / abs(cur["net"])
+                cur["entry_qty"] *= keep
+                cur["entry_quote"] *= keep
+                cur["net"] += signed
         else:                                   # 跨零翻向：切分
             close_qty = abs(cur["net"])
             frac = close_qty / qty if qty else 0.0
@@ -109,9 +120,9 @@ def entry_dates(conn, fund_db_path: str | Path = FUND_DB_PATH) -> dict:
     返回 {ticker: {open_date, rnd_date, entry_price, qty, num_opening_fills}}：
       open_date   当前持仓周期的起始日（净仓由 0 转非 0 那笔，UTC 日历日 ISO）
       rnd_date    ≤ open_date 的最近有 rnd_indicators 的交易日；无更早曲线 → None
-      entry_price **quote 加权平均开仓价**（口径同 fund 看板与币安 App 的 Entry
-                  Price：低位加仓会摊低，部分平仓不改）。代币化永续价，仅展示，
-                  不入 RND 计算。
+      entry_price **当前持仓的开仓均价**，口径同币安 PositionRisk / App 的 Entry
+                  Price：低位加仓会摊低；部分平仓均价不变，之后再加仓按剩余仓位
+                  加权（见 _walk_cycles）。代币化永续价，仅展示，不入 RND 计算。
       qty         当前净仓（带方向符号）
       num_opening_fills 本周期开仓笔数（>1 表示均价是多笔加权出来的）
     fund.db 不存在 → {}。同一 ticker 多方向并存取净敞口更大者（v0 简化，见 spec §6）。"""
@@ -122,7 +133,8 @@ def entry_dates(conn, fund_db_path: str | Path = FUND_DB_PATH) -> dict:
     try:
         rows = fconn.execute(
             "SELECT symbol, position_side, side, qty, quote_qty, fill_time "
-            "FROM binance_fills ORDER BY fill_time").fetchall()
+            "FROM binance_fills ORDER BY fill_time, binance_trade_id").fetchall()
+        # 同一毫秒常有多笔（一单多笔成交），trade id 按成交顺序单调 → 权威 tiebreak（同 derive.go）
     finally:
         fconn.close()
     out: dict[str, dict] = {}

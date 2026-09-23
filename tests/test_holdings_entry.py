@@ -29,18 +29,21 @@ def ms(datestr: str) -> int:
 
 
 def make_fund_db(fills):
-    """fills: list of (symbol, position_side, side, qty, price, 'YYYY-MM-DD')。返回临时路径。
+    """fills: list of (symbol, position_side, side, qty, price, 'YYYY-MM-DD'[, trade_id])。
+    返回临时路径。
 
-    quote_qty 按 qty*price 算（与币安一致），均价即按它加权。"""
+    quote_qty 按 qty*price 算（与币安一致），均价即按它加权。trade_id 省略时按
+    列表顺序编号（= 成交顺序）；显式给出可模拟「同一毫秒、插入顺序≠成交顺序」。"""
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE binance_fills "
-                 "(symbol TEXT, position_side TEXT, side TEXT, qty REAL, price REAL, "
-                 " quote_qty REAL, fill_time INTEGER)")
+                 "(binance_trade_id INTEGER, symbol TEXT, position_side TEXT, side TEXT, "
+                 " qty REAL, price REAL, quote_qty REAL, fill_time INTEGER)")
     conn.executemany(
-        "INSERT INTO binance_fills VALUES (?,?,?,?,?,?,?)",
-        [(s, ps, sd, q, pr, q * pr, ms(d)) for s, ps, sd, q, pr, d in fills])
+        "INSERT INTO binance_fills VALUES (?,?,?,?,?,?,?,?)",
+        [(f[6] if len(f) > 6 else i + 1, f[0], f[1], f[2], f[3], f[4], f[3] * f[4], ms(f[5]))
+         for i, f in enumerate(fills)])
     conn.commit()
     conn.close()
     return path
@@ -118,6 +121,110 @@ def test_partial_close_keeps_avg():
           e.get("entry_price"))
     check("净仓剩 1.0", abs(e.get("qty", 0) - 1.0) < 1e-9, e.get("qty"))
     check("open_date 仍是周期起点", e.get("open_date") == "2026-05-14", e.get("open_date"))
+
+
+def test_reduce_then_add():
+    print("\n[减仓后再加仓：剩余仓位 × 旧均价 + 新加仓（币安口径）]")
+    db = make_fund_db([
+        ("MUUSDT", "LONG", "BUY", 10.0, 100.0, "2026-05-14"),
+        ("MUUSDT", "LONG", "SELL", 8.0, 120.0, "2026-06-23"),   # 止盈减仓，剩 2 @100
+        ("MUUSDT", "LONG", "BUY", 8.0, 50.0, "2026-07-08")])    # 低位补仓
+    c = rnd_conn(TRADING_DAYS)
+    res = holdings_sync.entry_dates(c, fund_db_path=db)
+    os.unlink(db)
+    e = res.get("MU", {})
+    # 币安 (2×100 + 8×50)/10 = 60；已卖掉的 8 不该留在分母里（旧算法 1400/18 = 77.8）
+    check("均价 = 60（已平部分不稀释新加仓）", abs(e.get("entry_price", 0) - 60.0) < 1e-6,
+          e.get("entry_price"))
+    check("净仓 = 10", abs(e.get("qty", 0) - 10.0) < 1e-9, e.get("qty"))
+    check("open_date 仍是周期起点", e.get("open_date") == "2026-05-14", e.get("open_date"))
+    check("rnd_date 仍锚周期起点", e.get("rnd_date") == "2026-05-14", e.get("rnd_date"))
+    check("开仓笔数 = 2", e.get("num_opening_fills") == 2, e.get("num_opening_fills"))
+
+
+def test_short_reduce_then_add():
+    print("\n[空头减仓后再加仓：同口径]")
+    db = make_fund_db([
+        ("MUUSDT", "SHORT", "SELL", 10.0, 100.0, "2026-05-14"),
+        ("MUUSDT", "SHORT", "BUY", 8.0, 80.0, "2026-06-23"),    # 回补，剩 -2 @100
+        ("MUUSDT", "SHORT", "SELL", 8.0, 150.0, "2026-07-08")])  # 高位加空
+    c = rnd_conn(TRADING_DAYS)
+    res = holdings_sync.entry_dates(c, fund_db_path=db)
+    os.unlink(db)
+    e = res.get("MU", {})
+    # (2×100 + 8×150)/10 = 140
+    check("空头均价 = 140", abs(e.get("entry_price", 0) - 140.0) < 1e-6, e.get("entry_price"))
+    check("净仓 = -10", abs(e.get("qty", 0) + 10.0) < 1e-9, e.get("qty"))
+
+
+def test_multi_round_reduce_add():
+    print("\n[多轮减仓/加仓交替：逐步按剩余比例缩成本]")
+    db = make_fund_db([
+        ("MUUSDT", "LONG", "BUY", 4.0, 100.0, "2026-05-14"),
+        ("MUUSDT", "LONG", "BUY", 6.0, 80.0, "2026-06-01"),     # 10 @88
+        ("MUUSDT", "LONG", "SELL", 5.0, 95.0, "2026-06-10"),    # 5 @88
+        ("MUUSDT", "LONG", "BUY", 5.0, 60.0, "2026-06-23"),     # (440+300)/10 = 10 @74
+        ("MUUSDT", "LONG", "SELL", 8.0, 70.0, "2026-07-01"),    # 2 @74
+        ("MUUSDT", "LONG", "BUY", 3.0, 90.0, "2026-07-08")])    # (148+270)/5 = 5 @83.6
+    c = rnd_conn(TRADING_DAYS)
+    res = holdings_sync.entry_dates(c, fund_db_path=db)
+    os.unlink(db)
+    e = res.get("MU", {})
+    check("均价 = 83.6", abs(e.get("entry_price", 0) - 83.6) < 1e-6, e.get("entry_price"))
+    check("净仓 = 5", abs(e.get("qty", 0) - 5.0) < 1e-9, e.get("qty"))
+    check("开仓笔数 = 4", e.get("num_opening_fills") == 4, e.get("num_opening_fills"))
+
+
+def test_reduce_add_then_close_reopen():
+    print("\n[减仓加仓后全平再开：旧成本不串进新周期]")
+    db = make_fund_db([
+        ("MUUSDT", "LONG", "BUY", 10.0, 100.0, "2026-05-14"),
+        ("MUUSDT", "LONG", "SELL", 8.0, 120.0, "2026-06-01"),
+        ("MUUSDT", "LONG", "BUY", 8.0, 50.0, "2026-06-10"),
+        ("MUUSDT", "LONG", "SELL", 10.0, 70.0, "2026-06-23"),   # 全平
+        ("MUUSDT", "LONG", "BUY", 3.0, 70.0, "2026-07-08")])    # 新周期
+    c = rnd_conn(TRADING_DAYS)
+    res = holdings_sync.entry_dates(c, fund_db_path=db)
+    os.unlink(db)
+    e = res.get("MU", {})
+    check("均价 = 新周期的 70", abs(e.get("entry_price", 0) - 70.0) < 1e-6, e.get("entry_price"))
+    check("open_date = 新周期起点", e.get("open_date") == "2026-07-08", e.get("open_date"))
+    check("开仓笔数重置为 1", e.get("num_opening_fills") == 1, e.get("num_opening_fills"))
+
+
+def test_flip_after_reduce_add():
+    print("\n[单向持仓跨零翻向：新周期只含翻过去的那部分]")
+    db = make_fund_db([
+        ("MUUSDT", "BOTH", "BUY", 10.0, 100.0, "2026-05-14"),
+        ("MUUSDT", "BOTH", "SELL", 8.0, 110.0, "2026-06-01"),
+        ("MUUSDT", "BOTH", "BUY", 8.0, 50.0, "2026-06-10"),     # +10 @60
+        ("MUUSDT", "BOTH", "SELL", 15.0, 70.0, "2026-06-23"),   # 平 10、翻出 -5 @70
+        ("MUUSDT", "BOTH", "SELL", 5.0, 80.0, "2026-07-08")])   # 加空 → -10 @75
+    c = rnd_conn(TRADING_DAYS)
+    res = holdings_sync.entry_dates(c, fund_db_path=db)
+    os.unlink(db)
+    e = res.get("MU", {})
+    check("翻向后均价 = 75（只含翻过去的 5@70 + 加空 5@80）",
+          abs(e.get("entry_price", 0) - 75.0) < 1e-6, e.get("entry_price"))
+    check("净仓 = -10", abs(e.get("qty", 0) + 10.0) < 1e-9, e.get("qty"))
+    check("open_date = 翻向那笔", e.get("open_date") == "2026-06-23", e.get("open_date"))
+    check("开仓笔数 = 2（翻向笔 + 加空笔）", e.get("num_opening_fills") == 2,
+          e.get("num_opening_fills"))
+
+
+def test_same_ms_ordered_by_trade_id():
+    print("\n[同一毫秒多笔：按 trade id 定成交顺序（不看插入顺序）]")
+    db = make_fund_db([
+        ("MUUSDT", "LONG", "BUY", 10.0, 100.0, "2026-05-14", 1),
+        ("MUUSDT", "LONG", "BUY", 8.0, 50.0, "2026-07-08", 3),    # 先插入，但成交在后
+        ("MUUSDT", "LONG", "SELL", 8.0, 120.0, "2026-07-08", 2)])  # 同毫秒，先成交
+    c = rnd_conn(TRADING_DAYS)
+    res = holdings_sync.entry_dates(c, fund_db_path=db)
+    os.unlink(db)
+    e = res.get("MU", {})
+    # 真实顺序 id1→id2(卖)→id3(买)：(2×100 + 8×50)/10 = 60；按插入顺序走会得 77.8
+    check("均价 = 60（先减仓后补仓）", abs(e.get("entry_price", 0) - 60.0) < 1e-6,
+          e.get("entry_price"))
 
 
 def test_reopen_resets_avg():
@@ -198,7 +305,9 @@ def test_missing_db():
 
 
 for fn in (test_single_open, test_scale_in, test_average_down, test_partial_close_keeps_avg,
-           test_reopen_resets_avg, test_reopen, test_closed_excluded,
+           test_reduce_then_add, test_short_reduce_then_add, test_multi_round_reduce_add,
+           test_reduce_add_then_close_reopen, test_flip_after_reduce_add,
+           test_same_ms_ordered_by_trade_id, test_reopen_resets_avg, test_reopen, test_closed_excluded,
            test_snap_weekend, test_snap_before_data, test_blacklist_filtered, test_missing_db):
     fn()
 
