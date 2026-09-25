@@ -14,7 +14,7 @@ from . import queries as q
 _QUANTS = ("q05", "q25", "q50", "q75", "q95")
 
 # LLM 接缝配置（framework §4 / T1）。用户有 Anthropic/OpenAI 兼容中转，接入=填这三行 .env。
-ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-opus-4-8")
+ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-opus-5-5")
 # 质量优先：默认开满 reasoning，不计预算（用户定调）。effort 可用 .env 调到 xhigh/max。
 ASSISTANT_EFFORT = os.getenv("ASSISTANT_EFFORT", "high")
 
@@ -170,7 +170,7 @@ def generate(system: str, user: str, *, max_tokens: int = 16000) -> str:
                   messages=[{"role": "user", "content": user}])
     try:
         try:
-            # 开满深度思考（Opus 4.8 需显式 adaptive 才开；Fable 5 always-on）。
+            # 开满深度思考（Opus 系需显式 adaptive 才开；Fable 5 always-on）。
             resp = client.messages.create(
                 **kwargs, thinking={"type": "adaptive"}, output_config={"effort": ASSISTANT_EFFORT})
         except anthropic.BadRequestError:
