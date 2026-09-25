@@ -25,7 +25,7 @@
     </div>
   </div>
 
-  <!-- ===== 应用壳：侧栏三入口 今日 / 标的 / 助手 ===== -->
+  <!-- ===== 应用壳：侧栏四入口 今日 / 标的 / 止盈止损 / 助手 ===== -->
   <div v-if="isApp" class="page" :class="{ 'asst-page': view==='assistant' }">
 
     <header class="topbar">
@@ -50,6 +50,10 @@
           <button type="button" class="side-nav-item" :class="{ on: view==='symbol' }" @click="goSymbol()">
             <span class="side-nav-title">标的</span>
             <span class="side-nav-sub">{{ active || '深页' }}</span>
+          </button>
+          <button type="button" class="side-nav-item" :class="{ on: view==='exits' }" @click="goExits()">
+            <span class="side-nav-title">止盈止损</span>
+            <span class="side-nav-sub">{{ view==='exits' && exitActive ? exitActive + ' · 价位 → 概率' : '价位 → 概率' }}</span>
           </button>
           <button type="button" class="side-nav-item" :class="{ on: view==='assistant' }" @click="goAssistant">
             <span class="side-nav-title">✳ 研究助手</span>
@@ -137,6 +141,30 @@
           <div class="login-err" v-if="admErr">{{ admErr }}</div>
         </div>
 
+        </template>
+
+        <!-- 上下文：止盈止损 -->
+        <template v-if="view==='exits'">
+          <div class="zone-tag">币安持仓 · 点击切换</div>
+          <div v-for="h in exitList.holdings" :key="'x-'+h.symbol"
+               class="sym" :class="{ on: h.symbol===exitActive }" @click="switchExit(h.symbol)">
+            <div class="row">
+              <span class="sym-name">{{ h.symbol }}</span>
+              <span class="badge">{{ h.qty >= 0 ? '多' : '空' }} {{ fmtQty(h.qty) }}</span>
+            </div>
+            <div class="annot">成本 {{ fmtPx(h.entry_price) }} · 收盘 {{ fmtPx(h.close) }}
+              · <span :class="exitPnl(h) >= 0 ? 'pnl-up' : 'pnl-dn'">浮动 {{ fmtSignedPct(exitPnl(h)) }}</span></div>
+          </div>
+          <div v-if="exitList.loaded && !exitList.holdings.length" class="annot exit-empty">
+            现在没有落在 RND 池里的币安持仓。可以先看下面池内标的的当日曲线。</div>
+          <template v-if="exitList.others.length">
+            <div class="zone-tag">池内其他 · 只有当日曲线</div>
+            <div v-for="o in exitList.others" :key="'xo-'+o.symbol"
+                 class="sym slim" :class="{ on: o.symbol===exitActive }" @click="switchExit(o.symbol)">
+              <div class="row"><span class="sym-name">{{ o.symbol }}</span>
+                <span class="annot">收盘 {{ fmtPx(o.close) }}</span></div>
+            </div>
+          </template>
         </template>
 
         <!-- 上下文：助手 -->
@@ -530,6 +558,86 @@
           数据口径：ThetaData EOD · IV 自算 · SOFR 贴现 · 仅月度期权 · 钉 30 DTE + roll 打标 · 数据描述，不构成投资建议
         </footer>
       </main>
+
+        <!-- ===== 止盈止损：两条「价位 → 概率」曲线（spec 2026-09-25-exit-curves）===== -->
+        <main class="main" v-show="view==='exits'">
+          <div class="sym-chrome">
+            <div class="strip strip-embed" v-if="exitLoading && !exitData">
+              <span class="seg strong">{{ exitActive }} 加载中…</span>
+              <span class="seg faint">取冻结分布与当日分布</span>
+            </div>
+            <div class="strip strip-embed" v-else-if="exitData && exitData.ok">
+              <span class="seg strong">{{ exitData.symbol }}</span>
+              <span class="seg" v-if="exitData.position">
+                {{ exitData.position.qty >= 0 ? '多' : '空' }} {{ fmtQty(exitData.position.qty) }}
+                · 成本 <b>{{ fmtPx(exitData.position.entry_price) }}</b></span>
+              <span class="seg" v-else>无币安持仓</span>
+              <span class="seg">{{ exitData.date }} 美股收盘 <b>{{ fmtPx(exitData.close) }}</b></span>
+              <span class="seg">管到 {{ exitData.curves.today.expiry }}（剩 DTE {{ exitData.dte_now }}）</span>
+              <span class="seg"><span class="lamp" :class="exitData.curves.today.gate_pass ? 'ok':'bad'"></span>
+                当日闸门 {{ exitData.curves.today.gate_pass ? 'PASS' : 'FAIL' }}</span>
+            </div>
+            <div class="strip strip-embed" v-else-if="exitErr">
+              <span class="seg" style="color:#A33B2E">{{ exitErr }}</span></div>
+            <div class="strip strip-embed strip-ph" v-else>
+              <span class="seg faint">从左栏选一个标的</span></div>
+          </div>
+
+          <div class="zone"><span class="zone-tag">止盈止损 · 价位 → 概率</span>
+            <span class="annot">价位越远，锁定越多，被碰到的概率越低。目标价由你定，这里只说明每个价位在分布里意味着什么。</span></div>
+
+          <div class="exit-note" v-if="exitData && exitData.ok">
+            这些概率是<b>风险中性定价</b>，不是历史上实际发生的频率：期权市场一贯低估上涨，MU、SNDK 尤其明显，偏差多大见标的页的<a class="exit-link" href="#" @click.prevent="goSymbol(exitData.symbol)">PIT 校准卡</a>。曲线只管到 <b>{{ exitData.curves.today.expiry }}</b>（DTE {{ exitData.dte_now }}），持有期不同就不能直接套用。
+          </div>
+
+          <div class="exit-legend" v-if="exitData && exitData.ok" aria-label="图例">
+            <span><i class="lk-line"></i>到期收在该价位之外</span>
+            <span><i class="lk-band"></i>路上碰到过该价位（下沿必然，上沿最多）</span>
+            <span v-if="exitData.position"><i class="lk-zone win"></i>盈</span>
+            <span v-if="exitData.position"><i class="lk-zone loss"></i>亏（以锚点为界）</span>
+            <span><i class="lk-zone ext"></i>外推区，读数不可信</span>
+            <span class="faint">两张图共用价位轴，悬停一张，另一张同步读数</span>
+          </div>
+
+          <div class="card pad" v-if="exitData && exitData.ok && exitData.curves.cost">
+            <div class="row card-head">
+              <span class="card-title">从成本看
+                <span class="exit-sub">锚点 = 成本 {{ fmtPx(exitData.curves.cost.anchor) }}
+                  · 本周期 {{ exitData.curves.cost.date }} 冻结</span></span>
+              <span class="gate-mini" :style="{color: exitData.curves.cost.gate_pass ? '#3E7A52' : '#A33B2E'}">
+                <span class="lamp" :class="exitData.curves.cost.gate_pass ? 'ok':'bad'"></span>
+                闸门 {{ exitData.curves.cost.gate_pass ? 'PASS' : 'FAIL' }}</span>
+            </div>
+            <div class="annot">
+              {{ exitData.curves.cost.frozen_reason === 'entry' ? '入场日在本周期内，分布冻结在入场日' : '分布冻结在本周期第一天（换月后第一个钉住日）' }}，到 {{ exitData.curves.cost.expiry }} 前不变（冻结时 DTE {{ exitData.curves.cost.dte }}，今天剩 {{ exitData.dte_now }}）。和标的页「持仓 · 冻结线」卡不是同一个冻结：那张卡冻结在入场日，这里每次换月重新冻结一次。
+            </div>
+            <div class="exit-warn" v-if="!exitData.curves.cost.gate_pass">
+              ▮ {{ exitData.curves.cost.date }} 闸门未过：这一天的分布质量存疑，曲线照画，只作参考。</div>
+            <div ref="exitCostChart" class="chart exit-chart"></div>
+          </div>
+          <div class="card pad dashed" v-else-if="exitData && exitData.ok">
+            <div class="annot">{{ exitData.symbol }} 没有币安持仓，所以没有「从成本看」这条曲线，下面只画当日价位。</div>
+          </div>
+
+          <div class="card pad" v-if="exitData && exitData.ok">
+            <div class="row card-head">
+              <span class="card-title">从今天看
+                <span class="exit-sub">锚点 = {{ exitData.date }} 美股收盘 {{ fmtPx(exitData.close) }}
+                  · 分布每天更新</span></span>
+              <span class="gate-mini" :style="{color: exitData.curves.today.gate_pass ? '#3E7A52' : '#A33B2E'}">
+                <span class="lamp" :class="exitData.curves.today.gate_pass ? 'ok':'bad'"></span>
+                闸门 {{ exitData.curves.today.gate_pass ? 'PASS' : 'FAIL' }}</span>
+            </div>
+            <div class="exit-warn" v-if="!exitData.curves.today.gate_pass">
+              ▮ {{ exitData.date }} 闸门未过：这一天的分布质量存疑，曲线照画，只作参考。</div>
+            <div ref="exitTodayChart" class="chart exit-chart"></div>
+          </div>
+
+          <footer class="foot">
+            阴影带怎么读：下沿是到期收在该价位之外的概率（收在外面，路上一定经过）；上沿是任何与这条分布相容的价格路径碰到该价位的最大概率（Brown–Hobson–Rogers 超复制界，这个上界能取到）。盘中碰到、收盘碰到都落在区间里。<br />
+            起点 F 是分布当天的远期价：F 之上看「涨到过」，F 之下看「跌到过」；盈亏按锚点算，两者之间是减亏区（或利润回吐区）。锁定金额 = 净仓 ×（价位 − 锚点），按全仓计，币安代币化价与美股价位视为等同 · 数据描述，不构成投资建议
+          </footer>
+        </main>
 
         <!-- ===== 研究助手 ===== -->
         <main v-if="view==='assistant'" class="main asst-main">

@@ -582,3 +582,120 @@ def diagnostics(symbol: str, date: str, expiry: str) -> dict:
                  "checks": res.checks},
         "gate_detail": json.loads(res.indicators["gate_detail"]),
     }
+
+
+# ---------- 止盈止损曲线（docs/superpowers/specs/2026-09-25-exit-curves-design.md）----------
+
+EXIT_AXIS_POINTS = 241
+
+
+def _close_on(c, symbol: str, date: str) -> float | None:
+    r = c.execute("SELECT underlying_close FROM raw_chain WHERE date=? AND symbol=? LIMIT 1",
+                  (date, symbol)).fetchone()
+    return float(r[0]) if r and r[0] is not None else None
+
+
+def _exit_dist(c, symbol: str, date: str) -> dict | None:
+    """某日 pinned 分布：指标行 + CDF 网格 + 外推边界。缺指标行或曲线 → None。"""
+    ind = _row(c, "SELECT date, expiry, dte, forward, gate_pass, q05, q25 FROM rnd_indicators"
+                  " WHERE symbol=? AND date=? AND pinned=1", (symbol, date))
+    if ind is None:
+        return None
+    cur = _row(c, "SELECT grid_json, fit_meta FROM rnd_curve WHERE symbol=? AND date=? AND expiry=?",
+               (symbol, date, ind["expiry"]))
+    if cur is None:
+        return None
+    g = json.loads(cur["grid_json"])
+    x_lo, x_hi = json.loads(cur["fit_meta"]).get("x_quoted_range", [None, None])
+    F = ind["forward"]
+    return ind | {
+        "strikes": np.asarray(g["strikes"], dtype=float),
+        "cdf": np.asarray(g["cdf"], dtype=float),
+        "k_quoted": [F * float(np.exp(x_lo)), F * float(np.exp(x_hi))] if x_lo is not None else None,
+    }
+
+
+def _pack_exit_curve(dist: dict, anchor: float, qty: float | None, axis) -> dict:
+    from rnd import exit_curves as ec
+    rnd_ = lambda a, n: None if a is None else [round(float(v), n) for v in a]
+    br = ec.branches(dist["strikes"], dist["cdf"], dist["forward"], axis, anchor, qty)
+    return {
+        "date": dist["date"], "expiry": dist["expiry"], "dte": dist["dte"],
+        "gate_pass": bool(dist["gate_pass"]), "s0": dist["forward"], "anchor": anchor,
+        "q05": dist["q05"], "q25": dist["q25"], "k_quoted": dist["k_quoted"],
+        "grid": [float(dist["strikes"][0]), float(dist["strikes"][-1])],
+        **{side: {"prices": rnd_(b["prices"], 4), "expiry_prob": rnd_(b["expiry_prob"], 5),
+                  "touch_hi": rnd_(b["touch_hi"], 5), "pct": rnd_(b["pct"], 5),
+                  "locked": rnd_(b["locked"], 2)}
+           for side, b in br.items()},
+    }
+
+
+def exit_curves_list() -> dict:
+    """侧栏：有 RND 覆盖的币安持仓在前；池内其他标的（只能画当日曲线）在后。"""
+    from rnd import holdings_sync
+    c = conn()
+    try:
+        entries = holdings_sync.entry_dates(c)
+        holdings, others = [], []
+        for sym in get_symbols():
+            d = latest_date(c, sym)
+            if d is None:
+                continue
+            item = {"symbol": sym, "date": d, "close": _close_on(c, sym, d)}
+            e = entries.get(sym)
+            if e:
+                holdings.append(item | {"qty": e["qty"], "entry_price": e["entry_price"],
+                                        "open_date": e["open_date"]})
+            else:
+                others.append(item)
+    finally:
+        c.close()
+    return {"holdings": holdings, "others": others}
+
+
+def exit_curves(symbol: str) -> dict:
+    """两条「价位 → 概率」曲线（spec §2）。
+
+    cost ：本周期冻结分布（当前 pinned 到期的第一个 pinned 日；入场在本周期内则取入场日），
+           锚点 = 币安成本价。无持仓 → 不出。
+    today：最新数据日分布，锚点 = 当日美股收盘。
+    两条曲线共用同一价位轴（§6.3-4），方便上下对照。"""
+    from rnd import exit_curves as ec
+    from rnd import holdings_sync
+    c = conn()
+    try:
+        d = latest_date(c, symbol)
+        today = _exit_dist(c, symbol, d) if d else None
+        close = _close_on(c, symbol, d) if d else None
+        if today is None or close is None:
+            return {"ok": False, "symbol": symbol, "error": f"{symbol} 暂无可用的 RND 分布"}
+        pos = holdings_sync.entry_dates(c).get(symbol)
+        frozen = cycle_start = None
+        if pos:
+            first_pinned = ("SELECT MIN(date) FROM rnd_indicators WHERE symbol=? AND pinned=1"
+                            " AND expiry=? AND date>=?")
+            cycle_start = c.execute(first_pinned, (symbol, today["expiry"], "")).fetchone()[0]
+            fd = c.execute(first_pinned,
+                           (symbol, today["expiry"], pos.get("rnd_date") or "")).fetchone()[0]
+            frozen = _exit_dist(c, symbol, fd) if fd else None
+    finally:
+        c.close()
+    dists = [today] + ([frozen] if frozen else [])
+    lo, hi = ec.axis_range([(x["strikes"], x["cdf"]) for x in dists],
+                           [close, pos["entry_price"] if pos else None])
+    axis = np.linspace(lo, hi, EXIT_AXIS_POINTS)
+    qty = pos["qty"] if pos else None
+    curves = {"today": _pack_exit_curve(today, close, qty, axis)}
+    if frozen:
+        curves["cost"] = _pack_exit_curve(frozen, pos["entry_price"], qty, axis) | {
+            "cycle_start": cycle_start,
+            "frozen_reason": "cycle_start" if frozen["date"] == cycle_start else "entry",
+        }
+    return {
+        "ok": True, "symbol": symbol, "date": d, "close": close, "dte_now": today["dte"],
+        "axis": [lo, hi],
+        "position": None if not pos else {
+            k: pos[k] for k in ("qty", "entry_price", "open_date", "rnd_date")},
+        "curves": curves,
+    }

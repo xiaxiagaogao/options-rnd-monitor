@@ -281,3 +281,30 @@ body {
     transform: none !important;
   }
 }
+
+/* ---- 止盈止损（spec 2026-09-25-exit-curves）---- */
+.sym.slim { padding: 7px 11px; gap: 2px; }
+.pnl-up { color: #3E7A52; font-weight: 600; }
+.pnl-dn { color: #A33B2E; font-weight: 600; }
+.exit-empty { padding: 4px 2px; }
+.exit-sub { font-size: 11.5px; color: #8B877C; font-weight: 400; margin-left: 8px; }
+.exit-note { font-size: 12px; line-height: 1.75; color: #5C5952; background: #FBFAF8;
+  border: 1px solid #E4E1D9; border-radius: 6px; padding: 8px 12px; }
+.exit-link { color: #2F6B8F; text-decoration: underline; text-underline-offset: 2px;
+  text-decoration-thickness: 1px; }
+.exit-link:hover { color: #26241F; }
+.exit-link:focus-visible { outline: 2px solid #2F6B8F; outline-offset: 2px; border-radius: 2px; }
+.exit-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px;
+  font-size: 11px; color: #6E6A60; padding: 0 2px; }
+.exit-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.lk-line { display: inline-block; width: 18px; height: 2px; border-radius: 1px; background: #2F6B8F; }
+.lk-band { display: inline-block; width: 18px; height: 10px; border-radius: 2px;
+  background: rgba(47,107,143,.18); }
+.lk-zone { display: inline-block; width: 12px; height: 10px; border-radius: 2px; }
+.lk-zone.win { background: #E4EDE6; }
+.lk-zone.loss { background: #F2E4DD; }
+.lk-zone.ext { background: #E6E4DF; }
+.exit-warn { font-size: 12px; color: #8F5C22; background: #F5EBDD; border: 1px solid #E6D2B5;
+  border-radius: 4px; padding: 5px 10px; margin: 6px 0 2px; }
+.exit-chart { height: 300px; margin-top: 6px; }
+.side-nav-item:focus-visible, .sym:focus-visible { outline: 2px solid #2F6B8F; outline-offset: 2px; }

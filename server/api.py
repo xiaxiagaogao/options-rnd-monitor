@@ -153,6 +153,16 @@ def pit(symbol: str):
     return q.pit(valid_symbol(symbol))
 
 
+@app.get("/api/exit-curves", dependencies=[Depends(require_auth)])
+def exit_curves_list():
+    return q.exit_curves_list()
+
+
+@app.get("/api/symbol/{symbol}/exit-curves", dependencies=[Depends(require_auth)])
+def exit_curves(symbol: str):
+    return q.exit_curves(valid_symbol(symbol))
+
+
 @app.post("/api/journal/roll_check", dependencies=[Depends(require_auth)])
 def roll_check():
     from rnd.journal import roll_repin_check

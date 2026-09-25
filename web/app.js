@@ -96,11 +96,14 @@ createApp({
     // 全量市场展望
     outlook: null, outlookBusy: false, outlookErr: "",
     outlookElapsed: 0, outlookTimer: null, outlookAsof: null, outlookSecs: null,
+    // 止盈止损（spec 2026-09-25-exit-curves）
+    exitList: { holdings: [], others: [], loaded: false },
+    exitActive: null, exitData: null, exitErr: "", exitLoading: false, exitSeq: 0,
     presets: ["现在偏度和尾部在什么水平？", "我这笔持仓要注意什么？",
               "和指数并排有什么异常？", "今天闸门/拟合质量可信吗？"],
   }),
   computed: {
-    isApp() { return ["today", "symbol", "assistant"].includes(this.view); },
+    isApp() { return ["today", "symbol", "exits", "assistant"].includes(this.view); },
     dataDate() {
       if (this.detail && this.detail.date) return this.detail.date;
       const r = this.overview.find(o => o.ready && o.date);
@@ -192,11 +195,24 @@ createApp({
   },
   methods: {
     fmt(v, n = 2) { return v == null ? "—" : Number(v).toFixed(n); },
+    // 价位：四位数以上一位小数，否则两位
+    fmtPx(v) { return v == null ? "—" : Number(v).toFixed(Math.abs(v) >= 1000 ? 1 : 2); },
+    fmtQty(q) { return q == null ? "—" : String(+Math.abs(q).toFixed(6)); },
+    fmtSignedPct(x, n = 1) {
+      if (x == null || !isFinite(x)) return "—";
+      return (x >= 0 ? "+" : "−") + Math.abs(x * 100).toFixed(n) + "%";
+    },
+    // 侧栏浮动盈亏：按方向算收盘相对成本（多头涨为正、空头跌为正）
+    exitPnl(h) {
+      if (!h.entry_price || h.close == null) return null;
+      return (h.close / h.entry_price - 1) * (h.qty >= 0 ? 1 : -1);
+    },
     md(text) { return renderMarkdown(text); },
     // ---------- 研究助手 ----------
     // ---------- 侧栏三入口：今日 / 标的 / 助手 ----------
     pathFor(view, sym) {
       if (view === "assistant") return "/assistant";
+      if (view === "exits") return sym ? `/exits/${encodeURIComponent(sym)}` : "/exits";
       if (view === "symbol") return `/sym/${encodeURIComponent(sym || this.active || "SPY")}`;
       return "/";
     },
@@ -216,7 +232,7 @@ createApp({
         await this.sleep(20);
         this.uiFading = false;
         await this.$nextTick();
-        if (this.view === "symbol") {
+        if (this.view === "symbol" || this.view === "exits") {
           Object.values(this.charts).forEach(c => c && c.resize());
         }
       }
@@ -242,6 +258,22 @@ createApp({
       if (needLoad) await this.switchSymbol(s);
       else this.$nextTick(() => Object.values(this.charts).forEach(c => c && c.resize()));
     },
+    async goExits(sym) {
+      const leaving = this.view !== "exits";
+      await this.withPaneTransition(async () => {
+        this.view = "exits";
+      }, { animate: leaving });
+      if (!this.exitList.loaded) await this.loadExitList();
+      const target = (sym || this.exitActive || this.exitList.holdings[0]?.symbol
+                      || this.exitList.others[0]?.symbol || "").toUpperCase();
+      const path = this.pathFor("exits", target);
+      if (location.pathname !== path) {
+        if (leaving) history.pushState({ view: "exits", sym: target }, "", path);
+        else history.replaceState({ view: "exits", sym: target }, "", path);
+      }
+      if (target && (target !== this.exitActive || !this.exitData)) await this.switchExit(target);
+      else this.$nextTick(() => Object.values(this.charts).forEach(c => c && c.resize()));
+    },
     goAssistant() {
       this.asSymbol = this.active || this.asSymbol;
       return this.withPaneTransition(async () => {
@@ -258,6 +290,15 @@ createApp({
       if (path.startsWith("/assistant")) {
         this.asSymbol = this.active || this.asSymbol;
         this.view = "assistant";
+        return;
+      }
+      const xm = path.match(/^\/exits(?:\/([^/]+))?\/?$/);
+      if (xm) {
+        this.view = "exits";
+        if (!this.exitList.loaded) await this.loadExitList();
+        const s = (xm[1] ? decodeURIComponent(xm[1]) : (this.exitActive || this.exitList.holdings[0]?.symbol
+                   || this.exitList.others[0]?.symbol || "")).toUpperCase();
+        if (s && (s !== this.exitActive || !this.exitData)) await this.switchExit(s);
         return;
       }
       const m = path.match(/^\/sym(?:\/([^/]+))?\/?$/);
@@ -409,8 +450,14 @@ createApp({
     chart(refName) {
       const el = this.$refs[refName];
       if (!el) return null;
+      if (this.charts[refName] && this.charts[refName].getDom() !== el) {
+        this.charts[refName].dispose();
+        delete this.charts[refName];
+      }
       if (!this.charts[refName]) {
-        const c = echarts.init(el);
+        // markRaw：ECharts 实例不能被 Vue 响应式 Proxy 包裹，否则 setOption 在内部
+        // 取 series/visual 时读到代理对象，报 "Cannot read properties of undefined (reading 'type')"
+        const c = Vue.markRaw(echarts.init(el));
         this.charts[refName] = c;
         // 容器尺寸任何时刻变化（面板缩放、布局迟到、侧栏伸缩）都自动重排
         new ResizeObserver(() => c.resize()).observe(el);
@@ -682,6 +729,196 @@ createApp({
                      [{ xAxis: d.x_quoted[1] }, { xAxis: d.curve.x.at(-1) }]] } },
         ],
       }, true);
+    },
+    // ---------- 止盈止损 ----------
+    async loadExitList() {
+      try {
+        const r = await api("/api/exit-curves");
+        this.exitList = { holdings: r.holdings, others: r.others, loaded: true };
+      } catch (e) {
+        if (e.auth) { this.view = "login"; return; }
+        this.exitErr = e.detail || "持仓列表加载失败";
+        this.exitList = { holdings: [], others: [], loaded: true };
+      }
+    },
+    async switchExit(sym) {
+      if (!sym) return;
+      const seq = ++this.exitSeq;
+      this.exitActive = sym;
+      this.exitErr = "";
+      this.exitLoading = true;
+      this.exitData = null;
+      if (this.view === "exits") {
+        const path = this.pathFor("exits", sym);
+        if (location.pathname !== path) history.replaceState({ view: "exits", sym }, "", path);
+      }
+      try {
+        const r = await api(`/api/symbol/${sym}/exit-curves`);
+        if (seq !== this.exitSeq) return;
+        if (!r.ok) { this.exitErr = r.error || `${sym} 没有可用的分布`; return; }
+        this.exitData = r;
+        await this.$nextTick();
+        if (seq !== this.exitSeq) return;
+        this.renderExits();
+      } catch (e) {
+        if (e.auth) { this.view = "login"; return; }
+        if (seq === this.exitSeq) this.exitErr = e.detail || "曲线加载失败";
+      } finally {
+        if (seq === this.exitSeq) this.exitLoading = false;
+      }
+    },
+    renderExits() {
+      const d = this.exitData;
+      if (!d || !d.ok) return;
+      const qty = d.position ? d.position.qty : null;
+      const linked = [];
+      if (d.curves.cost) {
+        const c = this.renderExitChart("exitCostChart", d.curves.cost, "cost", d, qty);
+        if (c) linked.push(c);
+      }
+      const t = this.renderExitChart("exitTodayChart", d.curves.today, "today", d, qty);
+      if (t) linked.push(t);
+      // 签名交互：两张图共用价位轴，十字线与读数联动
+      linked.forEach(c => { c.group = "exits"; });
+      if (linked.length > 1) echarts.connect("exits");
+    },
+    // 盈亏底色 + 减亏/回吐子区 + 外推区（spec §3：底色以锚点为界，概率方向以 S0 为界）
+    exitZones(curve, qty, axis) {
+      const [x0, x1] = axis, a = curve.anchor, s0 = curve.s0, span = x1 - x0;
+      const WIN = "#E4EDE6", LOSS = "#F2E4DD";
+      const lab = (t, row) => ({ show: !!t, formatter: t || "", position: "insideTop",
+                                 fontSize: 10, color: "#6E6A60", distance: row ? 18 : 4 });
+      const area = (from, to, color, text, opacity = 0.75, row = 0) => {
+        const lo = Math.max(x0, Math.min(from, to)), hi = Math.min(x1, Math.max(from, to));
+        if (hi <= lo) return null;
+        return [{ xAxis: lo, itemStyle: { color, opacity },
+                  label: lab((hi - lo) / span > 0.04 ? text : "", row) }, { xAxis: hi }];
+      };
+      const zones = [];
+      if (qty != null && qty !== 0) {
+        const long = qty > 0;
+        const lowColor = long ? LOSS : WIN, highColor = long ? WIN : LOSS;
+        const lowText = long ? "亏" : "盈", highText = long ? "盈" : "亏";
+        const lo = Math.min(s0, a), hi = Math.max(s0, a);
+        if ((hi - lo) / span > 0.03) {
+          // [x0,lo] 必在锚点下侧、[hi,x1] 必在上侧；中间段随 S0 落在哪侧。
+          // 中间段在亏的一侧 = 减亏区（朝 S0 反向走才碰得到），在盈的一侧 = 利润回吐区
+          const midLow = s0 < a;
+          const midLoss = midLow === long;
+          zones.push(area(x0, lo, lowColor, lowText));
+          zones.push(area(lo, hi, midLow ? lowColor : highColor, midLoss ? "减亏" : "回吐", 0.5));
+          zones.push(area(hi, x1, highColor, highText));
+        } else {
+          zones.push(area(x0, a, lowColor, lowText));
+          zones.push(area(a, x1, highColor, highText));
+        }
+      }
+      const [g0, g1] = curve.grid;
+      if (curve.k_quoted) {
+        zones.push(area(x0, curve.k_quoted[0], "#8B877C", g0 > x0 ? "" : "外推", 0.10, 1));
+        zones.push(area(curve.k_quoted[1], x1, "#8B877C", g1 < x1 ? "" : "外推", 0.10, 1));
+      }
+      // 网格外：分布没有质量，两条读数都按 0 计——再叠一层更深的灰，明说
+      zones.push(area(x0, g0, "#8B877C", "网格外", 0.14, 1));
+      zones.push(area(g1, x1, "#8B877C", "网格外", 0.14, 1));
+      return zones.filter(Boolean);
+    },
+    exitMarks(curve, kind, d) {
+      const line = (x, text, color, type, width, position) => ({
+        xAxis: x, lineStyle: { color, type, width },
+        label: { formatter: text, position, fontSize: 10, color: "#44413C" },
+      });
+      // 竖线标签：insideEndTop 贴线左侧、insideEndBottom 贴线右侧。成本与收盘靠得近时，
+      // 让左边那条的标签朝左、右边那条朝右，两段文字背向而不相撞
+      const cost = d.position ? d.position.entry_price : null;
+      const costLeft = cost != null && cost < d.close;
+      const marks = [];
+      if (cost != null) marks.push(line(cost, `成本 ${this.fmtPx(cost)}`, "#26241F", "solid", 1.2,
+                                        costLeft ? "insideEndTop" : "insideEndBottom"));
+      marks.push(line(d.close, `收盘 ${this.fmtPx(d.close)}`, "#2F6B8F", "solid", 1.2,
+                      cost != null && !costLeft ? "insideEndTop" : "insideEndBottom"));
+      marks.push(line(curve.s0, `起点 F ${this.fmtPx(curve.s0)}`, "#26241F", "dotted", 1, "insideStartTop"));
+      if (kind === "cost") {
+        marks.push(line(curve.q25, `Q25 投机线 ${this.fmtPx(curve.q25)}`, "#C9C5BB", "solid", 1, "insideStartTop"));
+        marks.push(line(curve.q05, `Q05 信念线 ${this.fmtPx(curve.q05)}`, "#C9C5BB", "solid", 1, "insideStartTop"));
+      }
+      return marks.filter(m => m.xAxis != null);
+    },
+    // 悬停读数：按价位在对应分支里找最近点（概率方向按 S0 分支）
+    exitReadout(curve, kind, qty, x) {
+      const side = x >= curve.s0 ? "up" : "down";
+      const b = curve[side], P = b.prices;
+      let lo = 0, hi = P.length - 1;
+      while (hi - lo > 1) { const m = (lo + hi) >> 1; if (P[m] < x) lo = m; else hi = m; }
+      const i = Math.abs(P[lo] - x) <= Math.abs(P[hi] - x) ? lo : hi;
+      const pc = v => v < 0.001 ? "<0.1%" : (v * 100).toFixed(1) + "%";
+      const up = side === "up";
+      const rows = [
+        `<div style="font-weight:700;font-size:13px">${this.fmtPx(P[i])}` +
+          ` <span style="color:#8B877C;font-weight:400">较${kind === "cost" ? "成本" : "收盘"} ${this.fmtSignedPct(b.pct[i])}</span></div>`,
+        `<div>到期收在其${up ? "上" : "下"} <b>${pc(b.expiry_prob[i])}</b></div>`,
+        `<div>路上${up ? "涨" : "跌"}到过 <b>${pc(b.expiry_prob[i])} – ${pc(b.touch_hi[i])}</b></div>`,
+      ];
+      if (qty != null && b.locked) {
+        const v = b.locked[i];
+        const amt = Math.abs(v).toLocaleString("en-US", { maximumFractionDigits: Math.abs(v) >= 1000 ? 0 : 2 });
+        rows.push(`<div>全仓锁定 <b style="color:${v >= 0 ? "#3E7A52" : "#A33B2E"}">${v >= 0 ? "+" : "−"}${amt}</b></div>`);
+      }
+      return rows.join("");
+    },
+    renderExitChart(ref, curve, kind, d, qty) {
+      const ch = this.chart(ref);
+      if (!ch) return null;
+      const BLUE = "#2F6B8F";
+      const pts = (b, key) => b.prices.map((k, i) => [k, b[key][i]]);
+      // 阴影带：[价位, 上沿] 正向 + [价位, 下沿] 反向拼成闭合多边形
+      const band = (b) => ({
+        type: "custom", silent: true, z: 2, clip: true, data: [0],
+        tooltip: { show: false },
+        renderItem: (params, api) => ({
+          type: "polygon",
+          shape: { points: [...b.prices.map((k, i) => api.coord([k, b.touch_hi[i]])),
+                            ...b.prices.map((k, i) => api.coord([k, b.expiry_prob[i]])).reverse()] },
+          style: { fill: "rgba(47,107,143,0.16)" },
+        }),
+      });
+      const line = (b, extra = {}) => ({
+        type: "line", data: pts(b, "expiry_prob"), symbol: "none", z: 3,
+        lineStyle: { color: BLUE, width: 2, cap: "round", join: "round" },
+        emphasis: { disabled: true }, ...extra,
+      });
+      ch.setOption({
+        animation: false,
+        grid: { left: 44, right: 14, top: 16, bottom: 26 },
+        xAxis: { type: "value", min: d.axis[0], max: d.axis[1], scale: true,
+                 // 轴两端是算出来的非整数，不标；刻度取整数或两位小数
+                 axisLabel: { fontSize: 10, color: "#8B877C", showMinLabel: false, showMaxLabel: false,
+                              formatter: v => (Number.isInteger(v) ? String(v) : String(+v.toFixed(2))) },
+                 axisLine: { lineStyle: { color: "#C9C5BB" } }, splitLine: { show: false } },
+        yAxis: { type: "value", min: 0, max: 1, interval: 0.25,
+                 axisLabel: { fontSize: 10, color: "#8B877C", formatter: v => Math.round(v * 100) + "%" },
+                 splitLine: { lineStyle: { color: "#EFEDE8" } } },
+        tooltip: {
+          trigger: "axis", confine: true, backgroundColor: "#FFFFFF", borderColor: "#DDDAD2",
+          borderWidth: 1, padding: [8, 10], textStyle: { color: "#26241F", fontSize: 12 },
+          extraCssText: "box-shadow:0 4px 14px rgba(38,36,31,.10);border-radius:6px;line-height:1.7",
+          axisPointer: { type: "line", snap: false, lineStyle: { color: "#8B877C", width: 1 },
+                         label: { show: false } },
+          formatter: (ps) => {
+            const x = Array.isArray(ps) && ps.length ? ps[0].axisValue : null;
+            return x == null ? "" : this.exitReadout(curve, kind, qty, Number(x));
+          },
+        },
+        series: [
+          band(curve.down), band(curve.up),
+          line(curve.down, {
+            markArea: { silent: true, data: this.exitZones(curve, qty, d.axis) },
+            markLine: { silent: true, symbol: "none", data: this.exitMarks(curve, kind, d) },
+          }),
+          line(curve.up),
+        ],
+      }, true);
+      return ch;
     },
     // ---------- 准入与池管理 ----------
     async runAdmission() {

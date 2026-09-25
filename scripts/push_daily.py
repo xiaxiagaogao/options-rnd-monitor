@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server import alerts, assistant, queries
-from rnd import telegram
+from rnd import fetch, telegram
 
 
 def run(symbols: list[str] | None = None, *, do_digest: bool = True, dry: bool = False) -> list[str]:
@@ -23,6 +23,25 @@ def run(symbols: list[str] | None = None, *, do_digest: bool = True, dry: bool =
             "未配 TELEGRAM_BOT_TOKEN，跳过推送（.env 加 token 后生效）")
     syms = symbols or queries.get_symbols()
     sent: list[str] = []
+
+    # 0. 陈旧闸门：库内数据日落后数据源 → 先推告警；全面陈旧则不再推异动/展望。
+    #    2026-09-01 事故根因之二——增量拉取全挂而推送毫不知情，把同一份 08-28
+    #    报告当新的连发两天。闸门自身失败一律 fail-open（宁可多推也别静默）。
+    stale: list[tuple[str, str | None]] = []
+    vendor_latest = None
+    try:
+        vendor_latest = fetch.latest_trading_day("SPY")[0].isoformat()
+        stale = alerts.stale_symbols(syms, vendor_latest)
+    except Exception as e:  # noqa: BLE001
+        print(f"--- 陈旧闸门 --- 跳过（拿不到数据源交易日: {type(e).__name__}: {e}）")
+    if stale:
+        stale_text = alerts.format_staleness(stale, vendor_latest, len(syms))
+        print("--- 陈旧告警 ---\n" + stale_text)
+        if not dry:
+            telegram.send(stale_text)
+        sent.append(f"陈旧告警 {len(stale)}/{len(syms)}")
+        if len(stale) >= len(syms):
+            return sent
 
     # 1. 期权异动（确定性，快）
     items = alerts.todays_anomalies(syms)

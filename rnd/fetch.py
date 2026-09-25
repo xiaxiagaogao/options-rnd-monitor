@@ -1,10 +1,13 @@
 """ThetaData 数据获取层。EOD 报告口径（spec §1）。"""
 import datetime as dt
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from . import config  # noqa: F401  # 先加载 .env 与 grpc_proxy
+
+MARKET_TZ = ZoneInfo("America/New_York")
 
 
 @lru_cache(maxsize=1)
@@ -14,6 +17,17 @@ def _client():
         dotenv_path=str(config.PROJECT_ROOT / ".env"),
         dataframe_type="pandas",
     )
+
+
+def market_today(now: dt.datetime | None = None) -> dt.date:
+    """美东当日——所有 EOD 请求区间里的"今天"都必须用它，不能用 dt.date.today()。
+
+    ThetaData 服务端校验 end_date：`Date range contains future date; end must be
+    before or equal to today`（今天=美东）。生产 VPS 跑在 Asia/Singapore，cron
+    06:00 SGT 时本机日期已是美东的明天 —— 2026-09-01 起该校验上线，增量拉取全数
+    INVALID_ARGUMENT 挂掉、库冻在 08-28（推送层无陈旧闸门，照常发旧报告）。
+    """
+    return (now or dt.datetime.now(dt.timezone.utc)).astimezone(MARKET_TZ).date()
 
 
 def third_friday(year: int, month: int) -> dt.date:
@@ -62,8 +76,14 @@ def stock_history_eod_chunked(symbol: str, start: dt.date, end: dt.date) -> pd.D
 
     单块无数据（上市前/停牌/整段无新交易日）跳过，全窗口无数据返回空 DataFrame——
     由调用方按「空」优雅处理（backfill 跳过该标的、eod_update return 0），不冒泡崩溃。
-    持仓同步纳入的新标的常是近年上市（如 SNDK 2024 分拆），3 年窗口必然跨上市日。"""
+    持仓同步纳入的新标的常是近年上市（如 SNDK 2024 分拆），3 年窗口必然跨上市日。
+
+    end 超出美东今天时钳回（见 market_today）——调用方传本机"今天"是常态，
+    钳在这里可保护所有调用方；整段都在未来则不发请求、直接返回空。"""
     from thetadata.errors import NoDataFoundError
+    end = min(end, market_today())
+    if start > end:
+        return pd.DataFrame()
     frames = []
     s = start
     while s <= end:
@@ -78,7 +98,7 @@ def stock_history_eod_chunked(symbol: str, start: dt.date, end: dt.date) -> pd.D
 
 def latest_trading_day(symbol: str = "SPY") -> tuple[dt.date, float]:
     """最近一个已出 EOD 报告的交易日及其收盘价。"""
-    today = dt.date.today()
+    today = market_today()
     df = _client().stock_history_eod(
         symbol=symbol, start_date=today - dt.timedelta(days=10), end_date=today
     )
