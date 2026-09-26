@@ -78,6 +78,7 @@ createApp({
     view: "boot",
     password: "", loginErr: "",
     symbols: [], overview: [], events: [],
+    holdings: [], holdingsOutOfPool: [],   // 币安实际持仓（今日页摘要）
     active: "SPY", detail: null, fanData: null, fanDays: 120,
     densityData: { ok: false }, heatData: null,
     dcdfData: { ok: false }, pitData: { ok: false },
@@ -108,9 +109,6 @@ createApp({
       if (this.detail && this.detail.date) return this.detail.date;
       const r = this.overview.find(o => o.ready && o.date);
       return r ? r.date : null;
-    },
-    positionedSymbols() {
-      return this.overview.filter(o => o.positions);
     },
     ind() { return this.detail ? this.detail.indicators : null; },
     myPosition() {
@@ -389,6 +387,8 @@ createApp({
       try {
         const ov = await api("/api/overview");
         this.overview = ov.symbols;
+        this.holdings = ov.holdings || [];
+        this.holdingsOutOfPool = ov.holdings_out_of_pool || [];
         this.symbols = ov.symbols.map(o => o.symbol);
         const ready = ov.symbols.find(o => o.ready);
         this.active = (ready ? ready.symbol : this.symbols[0]) || "SPY";

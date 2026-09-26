@@ -223,19 +223,26 @@
             </div>
             <div class="card pad">
               <div class="row card-head"><span class="card-title">持仓摘要</span>
-                <span class="annot">journal 手动轨 · 非券商实时</span></div>
-              <template v-if="positionedSymbols.length">
-                <div v-for="o in positionedSymbols" :key="'pos-'+o.symbol" class="qrow"
-                     style="cursor:pointer" @click="goSymbol(o.symbol)">
-                  <span class="muted">{{ o.symbol }}</span>
-                  <span class="qv">● {{ o.positions }} 笔 · 点进标的看冻结线</span>
+                <span class="annot">币安实际持仓 · 日频同步</span></div>
+              <template v-if="holdings.length">
+                <div v-for="h in holdings" :key="'bh-'+h.symbol" class="qrow"
+                     style="cursor:pointer" @click="goSymbol(h.symbol)">
+                  <span style="display:inline-flex;align-items:center;gap:6px">
+                    <span v-if="h.breached !== null" class="lamp"
+                          :class="h.breached ? 'bad':'ok'"
+                          :title="h.breached ? '今收已跌破入场日 Q05' : '今收未跌破入场日 Q05'"></span>
+                    <span style="font-weight:600">{{ h.symbol }}</span>
+                  </span>
+                  <span class="qv">{{ h.open_date.slice(5) }} @ {{ fmt(h.entry_price,1) }}</span>
                 </div>
               </template>
               <div v-else class="annot" style="padding:12px 0">
-                当前池内无 journal 持仓。录入在「标的」页右侧；未来可并入券商实时轨（见 design-decisions）。
+                当前池内无币安持仓。池由 fund.db 每日同步驱动，建仓后次个 EOD 自动纳入。
               </div>
               <div class="annot" style="margin-top:12px;border-top:1px dashed #E4E1D9;padding-top:8px">
-                RND 池 {{ symbols.length }} 只（基准 + 持仓驱动）· 池外持仓不同步算图
+                入场日 @ 加权均价 · 灯示今收是否跌破入场日 Q05<br>
+                持仓 {{ holdings.length }} 只 · RND 池 {{ symbols.length }} 只（基准 + 持仓驱动）<span
+                  v-if="holdingsOutOfPool.length">· 池外 {{ holdingsOutOfPool.length }} 只不进算图（{{ holdingsOutOfPool.join(' ') }}）</span>
               </div>
             </div>
           </div>

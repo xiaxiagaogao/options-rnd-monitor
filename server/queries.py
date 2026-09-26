@@ -87,11 +87,14 @@ def state_at(c, symbol: str, date: str) -> list[dict]:
 def overview() -> dict:
     c = conn()
     out = []
-    for sym in get_symbols():
+    syms = get_symbols()
+    dates: dict[str, str] = {}
+    for sym in syms:
         d = latest_date(c, sym)
         if d is None:
             out.append({"symbol": sym, "ready": False})
             continue
+        dates[sym] = d
         ind = _row(c, "SELECT * FROM rnd_indicators WHERE symbol=? AND date=? AND pinned=1",
                    (sym, d))
         states = state_at(c, sym, d)
@@ -107,8 +110,32 @@ def overview() -> dict:
             "atm_iv_pct": next((s["pct"] for s in states if s["indicator"] == "atm_iv"), None),
             "extremes": extremes, "positions": len(pos),
         })
+    # 币安实际持仓摘要（今日页右栏）。口径同标的页那张卡：入场日取当前持仓周期起点、
+    # 价取 quote 加权均价；breached = 今收是否已越过入场日 Q05（多头看跌破、空头相反），
+    # 入场日无钉住行则为 None（不画灯，不臆造状态）。
+    from rnd import holdings_sync
+    entries = holdings_sync.entry_dates(c)
+    holdings = []
+    for sym in syms:
+        e = entries.get(sym)
+        if not e:
+            continue
+        breached = None
+        d = dates.get(sym)
+        if e.get("rnd_date") and d:
+            fr = _row(c, "SELECT q05 FROM rnd_indicators WHERE symbol=? AND date=? AND pinned=1",
+                      (sym, e["rnd_date"]))
+            cl = _row(c, "SELECT underlying_close FROM raw_chain WHERE symbol=? AND date=? LIMIT 1",
+                      (sym, d))
+            if fr and cl and cl["underlying_close"] is not None:
+                close = cl["underlying_close"]
+                breached = close < fr["q05"] if e["qty"] >= 0 else close > fr["q05"]
+        holdings.append({"symbol": sym, "open_date": e["open_date"],
+                         "entry_price": e["entry_price"], "qty": e["qty"],
+                         "breached": breached})
+    out_of_pool = sorted(t for t in entries if t not in syms)
     c.close()
-    return {"symbols": out}
+    return {"symbols": out, "holdings": holdings, "holdings_out_of_pool": out_of_pool}
 
 
 def symbol_detail(symbol: str) -> dict:
