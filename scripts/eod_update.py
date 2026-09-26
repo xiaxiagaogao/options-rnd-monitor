@@ -20,7 +20,7 @@ from rnd.timeseries import postprocess_symbol
 from rnd.pipeline.clean import quality_flags
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from backfill import compute_symbol, with_retry  # 复用计算循环与重试
+from backfill import DTE_MAX, DTE_MIN, compute_symbol, with_retry  # 复用计算循环与重试
 
 
 def _spawn_backfill(symbols: list[str]):
@@ -82,13 +82,13 @@ def update_symbol(conn, symbol: str, sofr: pd.Series, today: dt.date) -> int:
                       label=f"{symbol} expirations")
     exp_dates = sorted(pd.to_datetime(exps["expiration"]).dt.date)
     listed = set(exp_dates)
-    # 新交易日窗口内可能被钉到的月度：任一新交易日的 DTE ∈ [7,60]
+    # 新交易日窗口内可能被钉到的月度：任一新交易日的 DTE ∈ [DTE_MIN, DTE_MAX]
     monthlies = [e for e in exp_dates if fetch.is_monthly(e, listed)
-                 and days[0] + dt.timedelta(days=7) <= e <= days[-1] + dt.timedelta(days=60)]
+                 and days[0] + dt.timedelta(days=DTE_MIN) <= e <= days[-1] + dt.timedelta(days=DTE_MAX)]
     n_rows = 0
     for expiry in monthlies:
-        s = max(expiry - dt.timedelta(days=60), days[0])
-        e = min(expiry - dt.timedelta(days=7), days[-1])
+        s = max(expiry - dt.timedelta(days=DTE_MAX), days[0])
+        e = min(expiry - dt.timedelta(days=DTE_MIN), days[-1])
         if s > e:
             continue
         t0 = time.time()

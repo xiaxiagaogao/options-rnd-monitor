@@ -44,8 +44,13 @@ def is_monthly(e: dt.date, listed: set) -> bool:
     return abs((e - tf).days) <= 1 and tf not in listed
 
 
-def monthly_expirations(symbol: str, asof: dt.date, dte_min=7, dte_max=60, count=2):
-    """最近 count 个月度到期（DTE 限制内），从真实到期日列表中筛。"""
+def monthly_expirations(symbol: str, asof: dt.date, dte_min=None, dte_max=None, count=None):
+    """最近 count 个月度到期（DTE 限制内），从真实到期日列表中筛。
+
+    默认窗口取 config.EXPIRY（symbols.yaml），不再写死——见 config 里的说明。"""
+    dte_min = config.EXPIRY["dte_min"] if dte_min is None else dte_min
+    dte_max = config.EXPIRY["dte_max"] if dte_max is None else dte_max
+    count = config.EXPIRY["count"] if count is None else count
     exps = _client().option_list_expirations(symbol=symbol)
     dates = sorted(pd.to_datetime(exps["expiration"]).dt.date)
     listed = set(dates)

@@ -4,6 +4,8 @@ __pycache__/
 *.py[cod]
 *.sqlite
 *.sqlite3
+*.sqlite-wal      # WAL 运行时产物，曾误提交进 41249bc
+*.sqlite-shm
 *.db
 .DS_Store
 ThetaTerminal*.jar

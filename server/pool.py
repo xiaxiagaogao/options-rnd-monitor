@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from rnd.config import PROJECT_ROOT
+from rnd.config import EXPIRY, PROJECT_ROOT
 
 MAX_DYNAMIC = 2
 _JOBS: dict[str, dict] = {}   # symbol -> {pid, log}
@@ -28,10 +28,10 @@ pinned:
 
 # 到期日规则（spec §1）
 expiry:
-  monthly_only: true
-  dte_min: 7
-  dte_max: 60
-  count: 2
+  monthly_only: {monthly_only}
+  dte_min: {dte_min}
+  dte_max: {dte_max}
+  count: {count}
 """
 
 
@@ -54,9 +54,14 @@ def _fmt(items):
 
 
 def write_pool(baseline: list[str], holdings: list[str], pinned: list[str], yaml_path=None):
-    """写入标的池：baseline/holdings/pinned 三组整体重写 yaml_path（默认 symbols.yaml）。"""
+    """写入标的池：baseline/holdings/pinned 三组整体重写 yaml_path（默认 symbols.yaml）。
+
+    expiry 段按 config.EXPIRY 原样写回——这里曾写死 dte_min: 7，而 holdings_sync
+    每日重写 symbols.yaml，任何对到期窗口的修改都会被静默还原（改完次日即失效）。"""
     _yaml_path(yaml_path).write_text(_YAML_TEMPLATE.format(
-        baseline=_fmt(baseline), holdings=_fmt(holdings), pinned=_fmt(pinned)))
+        baseline=_fmt(baseline), holdings=_fmt(holdings), pinned=_fmt(pinned),
+        monthly_only=str(EXPIRY["monthly_only"]).lower(), dte_min=EXPIRY["dte_min"],
+        dte_max=EXPIRY["dte_max"], count=EXPIRY["count"]))
 
 
 def effective_symbols(yaml_path=None) -> list[str]:
