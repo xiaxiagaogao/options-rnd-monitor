@@ -4,7 +4,8 @@ __pycache__/
 *.py[cod]
 *.sqlite
 *.sqlite3
-*.sqlite-wal      # WAL 运行时产物，曾误提交进 41249bc
+# WAL 运行时产物（曾误提交进 41249bc）。注意：.gitignore 的 # 只在行首是注释
+*.sqlite-wal
 *.sqlite-shm
 *.db
 .DS_Store
