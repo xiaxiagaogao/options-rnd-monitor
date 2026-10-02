@@ -6,12 +6,17 @@
 """
 import json
 import os
+from pathlib import Path
 
 from rnd.state import STATE_INDICATORS
 
 from . import queries as q
 
 _QUANTS = ("q05", "q25", "q50", "q75", "q95")
+
+# 币安仓位没有投机/信念登记：纪律 3 两条线都给，不替用户选（2026-10 用户定）。
+IDENTITY_NOTE = ("身份未登记：币安仓位没有投机/信念登记。纪律 3 的两条线（投机→Q25、信念→Q05）"
+                 "都列出并各自标注，不替用户假设身份。")
 
 # LLM 接缝配置（framework §4 / T1）。用户有 Anthropic/OpenAI 兼容中转，接入=填这三行 .env。
 ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-fable-5-1")
@@ -92,7 +97,8 @@ def build_digest_messages(symbols: list[str]) -> tuple[dict, str | None]:
 
     复用九纪律 SYSTEM_PROMPT，只把 ask 换成"多标的短摘要、纯文本无表格"。返回 (messages, asof)。
     """
-    packs = {s: build_context(s) for s in symbols}
+    holdings = load_holdings()
+    packs = {s: build_context(s, holdings=holdings) for s in symbols}
     asof = next((p["meta"]["asof"] for p in packs.values() if p["meta"].get("asof")), None)
     body = json.dumps(packs, ensure_ascii=False, indent=2, default=str)
     user = (
@@ -116,7 +122,8 @@ def build_outlook_messages(symbols: list[str]) -> tuple[dict, str | None]:
     + 情景触发。红线焊死——描述定价环境偏向可以，给买卖/加减/对冲/仓位动作不行、不预测涨跌。
     复用九纪律 SYSTEM_PROMPT。返回 (messages, asof)。
     """
-    packs = {s: build_context(s) for s in symbols}
+    holdings = load_holdings()
+    packs = {s: build_context(s, holdings=holdings) for s in symbols}
     asof = next((p["meta"]["asof"] for p in packs.values() if p["meta"].get("asof")), None)
     body = json.dumps(packs, ensure_ascii=False, indent=2, default=str)
     user = (
@@ -133,7 +140,11 @@ def build_outlook_messages(symbols: list[str]) -> tuple[dict, str | None]:
         "- 支撑：只挑 1-2 个最有信息量的读数论证（点名不对称、跨指数对照、日环比），别铺全指标。\n"
         "- **情景触发**：一条「若…则…」。\n"
         "- 有持仓的标的：这套定价对你的论点是**逆风 / 顺风 / 中性**（挂失效线、偏移）"
-        "——判定顺逆风可以，给动作不行。\n\n"
+        "——判定顺逆风可以，给动作不行。\n"
+        "  · 身份未登记（identity 为 null）的持仓：投机线 Q25 与信念线 Q05 两条都挂、"
+        "注明「身份未登记」，不替用户选。\n"
+        "  · 失效线按包内 frozen_basis 写明口径（本周期冻结 + 冻结日）。\n"
+        "  · position.open 为 null = 持仓状态未知：照实说，不写成无持仓。\n\n"
         "【红线——展望不是指令】\n"
         "- 允许：决断的环境净判断、点名不对称、情景触发、**对已有论点/持仓的顺逆风判定**"
         "（如「这对多头是逆风」）。\n"
@@ -188,7 +199,28 @@ def generate(system: str, user: str, *, max_tokens: int = 16000) -> str:
     return text
 
 
-def build_context(symbol: str, asof: str | None = None) -> dict:
+def load_holdings() -> dict:
+    """币安实际持仓快照（holdings_sync.entry_dates，即标的页 binance_entry 的来源）。
+
+    返回 {"entries": {ticker: {...}}, "error": None}；fund.db 缺失或读取失败 →
+    entries=None + error，与「确实无持仓」分开（读不到不能写成无持仓）。
+    多标的装配只调一次，经 build_context(holdings=...) 共用。
+    """
+    from rnd import holdings_sync
+    path = Path(holdings_sync.FUND_DB_PATH)
+    if not path.exists():
+        return {"entries": None, "error": f"币安持仓源 fund.db 不可用（{path}）"}
+    c = q.conn()
+    try:
+        return {"entries": holdings_sync.entry_dates(c, path), "error": None}
+    except Exception as e:  # noqa: BLE001  持仓读失败不该拖垮整份展望
+        return {"entries": None, "error": f"读取币安持仓失败（{type(e).__name__}: {e}）"}
+    finally:
+        c.close()
+
+
+def build_context(symbol: str, asof: str | None = None, *, holdings: dict | None = None) -> dict:
+    """holdings：load_holdings() 的结果；None → 本函数自读。"""
     symbol = symbol.upper()
     c = q.conn()
     asof = asof or q.latest_date(c, symbol)
@@ -203,6 +235,12 @@ def build_context(symbol: str, asof: str | None = None) -> dict:
         c, "SELECT underlying_close FROM raw_chain WHERE symbol=? AND date=? LIMIT 1",
         (symbol, asof)) if asof else None
     current_close = close_row["underlying_close"] if close_row else None
+    if positions:
+        position = _position(ind, positions, current_close)
+    else:
+        position = _binance_position(c, symbol, asof, ind,
+                                     holdings if holdings is not None else load_holdings(),
+                                     current_close)
     c.close()
 
     meta = {
@@ -217,7 +255,7 @@ def build_context(symbol: str, asof: str | None = None) -> dict:
         "state": _state(states),
         "quality": _quality(ind),
         "benchmark": _benchmark(bench, bench_states),
-        "position": _position(ind, positions, current_close),
+        "position": position,
         "events": _events(symbol, asof),
         "summary": _summary(symbol, asof, ind),
     }
@@ -300,6 +338,7 @@ def _position(ind: dict | None, positions: list[dict], current_close) -> dict:
         invalidated = (current_close < stop_level) if long else (current_close > stop_level)
     return {
         "open": True,
+        "source": "journal",
         "position_id": p.get("position_id"),
         "identity": p.get("identity"),
         "direction": p.get("direction"),
@@ -315,6 +354,72 @@ def _position(ind: dict | None, positions: list[dict], current_close) -> dict:
         "stop_level": stop_level,
         "current_close": current_close,
         "invalidated": invalidated,
+    }
+
+
+def _binance_position(c, symbol: str, asof: str | None, ind: dict | None,
+                      holdings: dict, current_close) -> dict:
+    """币安实际持仓（journal 无开仓时；2026-08-06 口径决策：以 fund 同步为准）。
+
+    - 身份未登记 → identity/stop_q 为 None，stop_lines 同时给投机 Q25 与信念 Q05。
+    - 冻结 = 本周期冻结（queries.cycle_freeze_date），与止盈止损页曲线一同一套数；
+      标的页持仓卡 / 今日页的灯按入场日冻结，数字会不同。
+    - 偏移与失效判定同 journal 轨：(现Q − 冻结Q)/冻结σ1；收盘确认，多头 close < 线 → 失效（空头反向）。
+    """
+    if holdings["entries"] is None:
+        return {"open": None, "source": "binance",
+                "reason": f"{holdings['error']}；持仓状态未知，不得写成无持仓"}
+    e = holdings["entries"].get(symbol)
+    if e is None:
+        return {"open": False}
+    # 用 snap 后的 rnd_date 比，不用 open_date：收盘后、cron 前开的仓 UTC 日已跨到次日，
+    # 但对最新数据日仍算在仓（同止盈止损页）。只有历史 asof 早于开仓那个交易日才算不在仓。
+    if asof and e.get("rnd_date") and e["rnd_date"] > asof:
+        return {"open": False, "note": f"币安当前持仓开于 {e['open_date']}，晚于数据日 {asof}"}
+    long = e["qty"] >= 0
+    out = {
+        "open": True,
+        "source": "binance",
+        "direction": "long" if long else "short",
+        "identity": None,
+        "stop_q": None,
+        "identity_note": IDENTITY_NOTE,
+        "entry_price": e["entry_price"],
+        "qty": e["qty"],
+        "open_date": e["open_date"],
+        "current_close": current_close,
+    }
+    fd = cycle_start = None
+    if ind is not None:
+        fd, cycle_start = q.cycle_freeze_date(c, symbol, ind["expiry"], e.get("rnd_date"))
+    fr = q._row(
+        c, "SELECT date, expiry, forward, sigma1_abs, gate_pass, q05, q25, q50, q75, q95"
+           " FROM rnd_indicators WHERE symbol=? AND date=? AND pinned=1",
+        (symbol, fd)) if fd else None
+    if fr is None:
+        return out | {"frozen": None, "frozen_basis": "无可用冻结行（数据日无钉住指标）",
+                      "offset": None, "stop_lines": None}
+
+    sig = fr["sigma1_abs"]
+
+    def line(qk: str) -> dict:
+        level = fr[qk]
+        inv = None
+        if level is not None and current_close is not None:
+            inv = (current_close < level) if long else (current_close > level)
+        return {"quantile": qk, "level": level, "invalidated": inv}
+
+    start = ("本周期第一天，入场早于本周期" if fd == cycle_start else "入场日在本周期内")
+    gate = "" if fr["gate_pass"] else "；冻结日闸门未过"
+    return out | {
+        "frozen_basis": f"本周期冻结 {fd}（当前钉住到期 {fr['expiry']}；{start}；换月时重钉{gate}）",
+        "frozen": {
+            "frozen_date": fr["date"], "frozen_expiry": fr["expiry"],
+            "frozen_forward": fr["forward"], "frozen_sigma1": sig,
+            "frozen_gate_pass": bool(fr["gate_pass"]),
+            **{f"frozen_{k}": fr[k] for k in _QUANTS}},
+        "offset": {k: (ind[k] - fr[k]) / sig for k in _QUANTS} if sig else None,
+        "stop_lines": {"speculative": line("q25"), "conviction": line("q05")},
     }
 
 

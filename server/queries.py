@@ -642,6 +642,19 @@ def _exit_dist(c, symbol: str, date: str) -> dict | None:
     }
 
 
+def cycle_freeze_date(c, symbol: str, expiry: str, rnd_date: str | None) -> tuple[str | None, str | None]:
+    """本周期冻结日（exit-curves spec §6-1）= max(本周期第一天, 入场日 rnd_date)。
+
+    本周期第一天 = 当前钉住到期 expiry 最早被钉住的那天；rnd_date 为空（开仓早于数据）
+    取本周期第一天。等价于换月重钉（journal.roll_repin_check）：周期内冻结，换月重钉一次。
+    止盈止损页曲线一与研究助手的币安持仓冻结线共用此口径。返回 (冻结日, 本周期第一天)。"""
+    first_pinned = ("SELECT MIN(date) FROM rnd_indicators WHERE symbol=? AND pinned=1"
+                    " AND expiry=? AND date>=?")
+    cycle_start = c.execute(first_pinned, (symbol, expiry, "")).fetchone()[0]
+    fd = c.execute(first_pinned, (symbol, expiry, rnd_date or "")).fetchone()[0]
+    return fd, cycle_start
+
+
 def _pack_exit_curve(dist: dict, anchor: float, qty: float | None, axis) -> dict:
     from rnd import exit_curves as ec
     rnd_ = lambda a, n: None if a is None else [round(float(v), n) for v in a]
@@ -700,11 +713,7 @@ def exit_curves(symbol: str) -> dict:
         pos = holdings_sync.entry_dates(c).get(symbol)
         frozen = cycle_start = None
         if pos:
-            first_pinned = ("SELECT MIN(date) FROM rnd_indicators WHERE symbol=? AND pinned=1"
-                            " AND expiry=? AND date>=?")
-            cycle_start = c.execute(first_pinned, (symbol, today["expiry"], "")).fetchone()[0]
-            fd = c.execute(first_pinned,
-                           (symbol, today["expiry"], pos.get("rnd_date") or "")).fetchone()[0]
+            fd, cycle_start = cycle_freeze_date(c, symbol, today["expiry"], pos.get("rnd_date"))
             frozen = _exit_dist(c, symbol, fd) if fd else None
     finally:
         c.close()
