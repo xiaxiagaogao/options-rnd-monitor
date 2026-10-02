@@ -109,7 +109,7 @@ def test_eod_update_uses_market_today():
 
     def fake_chunked(symbol, start, end):
         captured["window"] = (start, end)
-        return pd.DataFrame()   # 空 → update_symbol 走"无新交易日"提前返回
+        return pd.DataFrame()   # 空 → update_symbol 提前返回（未发布/休市由 run_incremental 判）
 
     conn = mock.MagicMock()
     conn.execute.return_value.fetchone.return_value = ("2026-08-28",)

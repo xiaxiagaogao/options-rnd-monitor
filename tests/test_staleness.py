@@ -147,8 +147,43 @@ def test_guard_fails_open():
     check("异动 + 展望 照常推", len(sends) == 2, f"sends={len(sends)}")
 
 
+# ---------- 7. eod_update 传入的参照日比 SPY 新 → 闸门按参照日判 ----------
+def test_ref_day_overrides_older_vendor():
+    print("\n[7] 数据源整体未发布（SPY 也停在昨天）：闸门按 eod_update 的参照日判")
+    seen = []
+
+    def fake_stale(syms, vendor_latest):
+        seen.append(vendor_latest)
+        return [(s, "2026-09-30") for s in syms]
+
+    for label, latest in (("SPY 停在 09-30", mock.DEFAULT), ("SPY 拿不到", RuntimeError("down"))):
+        seen.clear()
+        kw = ({"return_value": (dt.date(2026, 9, 30), 640.0)} if latest is mock.DEFAULT
+              else {"side_effect": latest})
+        with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "x"}), \
+             mock.patch.object(push_daily.fetch, "latest_trading_day", **kw), \
+             mock.patch.object(push_daily.alerts, "stale_symbols", side_effect=fake_stale), \
+             mock.patch.object(push_daily.alerts, "todays_anomalies", return_value=[]), \
+             mock.patch.object(push_daily.telegram, "send"):
+            sent = push_daily.run(["SPY", "QQQ"], ref_day="2026-10-01")
+        check(f"{label}：闸门基准 = 参照日 10-01", seen == ["2026-10-01"], f"seen={seen}")
+        check(f"{label}：全面陈旧只推告警", sent == ["陈旧告警 2/2"], f"sent={sent}")
+
+    # 参照日比 SPY 旧（常态：参照日就是库内最新）→ 仍以数据源为准
+    seen.clear()
+    with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "x"}), \
+         mock.patch.object(push_daily.fetch, "latest_trading_day",
+                           return_value=(dt.date(2026, 10, 1), 640.0)), \
+         mock.patch.object(push_daily.alerts, "stale_symbols", side_effect=fake_stale), \
+         mock.patch.object(push_daily.alerts, "todays_anomalies", return_value=[]), \
+         mock.patch.object(push_daily.telegram, "send"):
+        push_daily.run(["SPY"], ref_day="2026-09-30", do_digest=False)
+    check("参照日更旧时取数据源日", seen == ["2026-10-01"], f"seen={seen}")
+
+
 for fn in (test_stale_symbols, test_format_staleness, test_push_all_stale,
-           test_push_partial_stale, test_push_fresh, test_guard_fails_open):
+           test_push_partial_stale, test_push_fresh, test_guard_fails_open,
+           test_ref_day_overrides_older_vendor):
     fn()
 
 print()

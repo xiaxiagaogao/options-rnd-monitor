@@ -17,7 +17,8 @@ from server import alerts, assistant, queries
 from rnd import fetch, telegram
 
 
-def run(symbols: list[str] | None = None, *, do_digest: bool = True, dry: bool = False) -> list[str]:
+def run(symbols: list[str] | None = None, *, do_digest: bool = True, dry: bool = False,
+        ref_day: str | None = None) -> list[str]:
     if not dry and not os.getenv("TELEGRAM_BOT_TOKEN"):
         raise telegram.TelegramNotConfigured(
             "未配 TELEGRAM_BOT_TOKEN，跳过推送（.env 加 token 后生效）")
@@ -27,13 +28,22 @@ def run(symbols: list[str] | None = None, *, do_digest: bool = True, dry: bool =
     # 0. 陈旧闸门：库内数据日落后数据源 → 先推告警；全面陈旧则不再推异动/展望。
     #    2026-09-01 事故根因之二——增量拉取全挂而推送毫不知情，把同一份 08-28
     #    报告当新的连发两天。闸门自身失败一律 fail-open（宁可多推也别静默）。
+    #    ref_day = eod_update 判出的参照交易日：数据源整体未发布时 SPY 自己也停在
+    #    上一交易日，只看 SPY 会把全池落后当成"不陈旧"——取两者较新者为基准。
     stale: list[tuple[str, str | None]] = []
     vendor_latest = None
     try:
         vendor_latest = fetch.latest_trading_day("SPY")[0].isoformat()
-        stale = alerts.stale_symbols(syms, vendor_latest)
     except Exception as e:  # noqa: BLE001
-        print(f"--- 陈旧闸门 --- 跳过（拿不到数据源交易日: {type(e).__name__}: {e}）")
+        print(f"--- 陈旧闸门 --- 拿不到数据源交易日（{type(e).__name__}: {e}）")
+    vendor_latest = max(filter(None, (vendor_latest, ref_day)), default=None)
+    if vendor_latest is None:
+        print("--- 陈旧闸门 --- 跳过（无基准交易日）")
+    else:
+        try:
+            stale = alerts.stale_symbols(syms, vendor_latest)
+        except Exception as e:  # noqa: BLE001
+            print(f"--- 陈旧闸门 --- 跳过（{type(e).__name__}: {e}）")
     if stale:
         stale_text = alerts.format_staleness(stale, vendor_latest, len(syms))
         print("--- 陈旧告警 ---\n" + stale_text)

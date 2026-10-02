@@ -30,6 +30,18 @@ def market_today(now: dt.datetime | None = None) -> dt.date:
     return (now or dt.datetime.now(dt.timezone.utc)).astimezone(MARKET_TZ).date()
 
 
+TRADING_SESSION_TYPES = {"open", "early_close"}   # 另两种：full_close（休市）、weekend
+
+
+def market_session_today() -> dict:
+    """数据源交易日历的今日（美东）场次 {'type', 'open', 'close'}，type ∈
+    open / early_close / full_close / weekend。
+
+    免费档只开放这一个日历端点：calendar_on_date / calendar_year 要 value 档
+    （2026-10-02 实测 PERMISSION_DENIED）——所以只能问"今天"，查不了任意日期。"""
+    return _client().calendar_open_today().to_dict("records")[0]
+
+
 def third_friday(year: int, month: int) -> dt.date:
     d = dt.date(year, month, 15)
     return d + dt.timedelta(days=(4 - d.weekday()) % 7)
