@@ -94,35 +94,53 @@ p_spy = ctx.get("position", {})
 check("有 position 块", isinstance(ctx.get("position"), dict))
 check("SPY position.open == False", p_spy.get("open") is False, f"got={p_spy.get('open')}")
 
-# --- 6b. 持仓块：有仓时的身份/止损/冻结线/偏移（NVDA 用户仓，只读）---
+# --- 6b. 持仓块：有仓时的冻结线/偏移（NVDA，只读）---
+# journal 有开仓 → journal 轨（身份/止损分位）；否则币安持有 → 币安轨（身份未登记、两条线、
+# 本周期冻结）；都没有 → SKIP。用户 08-06 已平掉 NVDA 的 journal 条目，线上走币安轨。
 ctx_n = assistant.build_context("NVDA")
 pn = ctx_n.get("position", {})
 c = q.conn()
 d_n = q.latest_date(c, "NVDA")
 ind_n = q._row(c, "SELECT * FROM rnd_indicators WHERE symbol=? AND date=? AND pinned=1",
                (d_n and "NVDA", d_n))
-raw = q.open_positions(c, "NVDA")[0]
+jr = q.open_positions(c, "NVDA")
 c.close()
-check("NVDA position.open == True", pn.get("open") is True, f"got={pn.get('open')}")
-check("NVDA identity == conviction", pn.get("identity") == raw["identity"],
-      f"got={pn.get('identity')}")
-check("NVDA stop_q == q05", pn.get("stop_q") == raw["stop_q"], f"got={pn.get('stop_q')}")
-check("NVDA frozen 快照含 5 冻结分位 + forward + sigma1",
-      isinstance(pn.get("frozen"), dict)
-      and {"frozen_q05", "frozen_q50", "frozen_q95", "frozen_forward", "frozen_sigma1"}
-      <= set(pn.get("frozen", {})))
-# 偏移量 = (现 Q − 冻结 Q) / 冻结 σ1（§2.1 罗盘读数），服务端算好
-off = pn.get("offset", {})
-sig = raw["frozen_sigma1"]
-exp_q50 = (ind_n["q50"] - raw["frozen_q50"]) / sig
-check("offset 覆盖 q05..q95", isinstance(off, dict)
-      and set(off) == {"q05", "q25", "q50", "q75", "q95"}, f"keys={sorted(off) if isinstance(off, dict) else off}")
-check("offset.q50 == (现Q50−冻结Q50)/冻结σ1",
-      off.get("q50") is not None and abs(off["q50"] - exp_q50) < 1e-9,
-      f"got={off.get('q50')} expect={exp_q50:.6f}")
-check("position 有失效判定 invalidated(bool) + stop_level",
-      isinstance(pn.get("invalidated"), bool) and pn.get("stop_level") is not None,
-      f"inv={pn.get('invalidated')} stop={pn.get('stop_level')}")
+if jr:
+    raw = jr[0]
+    check("NVDA position.open == True", pn.get("open") is True, f"got={pn.get('open')}")
+    check("NVDA source == journal", pn.get("source") == "journal", f"got={pn.get('source')}")
+    check("NVDA identity 同 journal", pn.get("identity") == raw["identity"],
+          f"got={pn.get('identity')}")
+    check("NVDA stop_q 同 journal", pn.get("stop_q") == raw["stop_q"], f"got={pn.get('stop_q')}")
+    check("NVDA frozen 快照含 5 冻结分位 + forward + sigma1",
+          isinstance(pn.get("frozen"), dict)
+          and {"frozen_q05", "frozen_q50", "frozen_q95", "frozen_forward", "frozen_sigma1"}
+          <= set(pn.get("frozen", {})))
+    fz_q50, sig = raw["frozen_q50"], raw["frozen_sigma1"]
+    check("position 有失效判定 invalidated(bool) + stop_level",
+          isinstance(pn.get("invalidated"), bool) and pn.get("stop_level") is not None,
+          f"inv={pn.get('invalidated')} stop={pn.get('stop_level')}")
+elif pn.get("source") == "binance" and pn.get("open") is True:
+    fz = pn.get("frozen") or {}
+    check("NVDA 币安轨：身份未登记", pn.get("identity") is None and pn.get("stop_q") is None)
+    check("NVDA 币安轨：本周期冻结口径", "本周期冻结" in (pn.get("frozen_basis") or ""),
+          f"got={pn.get('frozen_basis')}")
+    check("NVDA 币安轨：两条线（投机 Q25 / 信念 Q05）且有收盘确认判定",
+          all(isinstance(((pn.get("stop_lines") or {}).get(k) or {}).get("invalidated"), bool)
+              for k in ("speculative", "conviction")), f"got={pn.get('stop_lines')}")
+    fz_q50, sig = fz.get("frozen_q50"), fz.get("frozen_sigma1")
+else:
+    print(f"  SKIP  6b：NVDA 无 journal 开仓也无币安持仓（position={pn}）")
+    fz_q50 = sig = None
+if fz_q50 is not None and sig:
+    # 偏移量 = (现 Q − 冻结 Q) / 冻结 σ1（§2.1 罗盘读数），服务端算好
+    off = pn.get("offset", {})
+    exp_q50 = (ind_n["q50"] - fz_q50) / sig
+    check("offset 覆盖 q05..q95", isinstance(off, dict)
+          and set(off) == {"q05", "q25", "q50", "q75", "q95"}, f"keys={sorted(off) if isinstance(off, dict) else off}")
+    check("offset.q50 == (现Q50−冻结Q50)/冻结σ1",
+          off.get("q50") is not None and abs(off["q50"] - exp_q50) < 1e-9,
+          f"got={off.get('q50')} expect={exp_q50:.6f}")
 
 # --- 7. 事件块：近窗（与仪表盘 events 同源）---
 ev = ctx.get("events")
