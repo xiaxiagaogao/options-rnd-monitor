@@ -9,6 +9,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server import assistant, queries as q
+from rnd import holdings_sync
+
+# position.open 是三态：True 在仓 / False 不在仓 / None 持仓状态未知（fund.db 读不到）。
+# 本机没有 fund.db 时指向一个合成的空 fund.db，「不在仓」才有确定含义；None 分支由
+# tests/test_assistant_holdings.py 覆盖。线上有 fund.db，照用真实持仓。
+if not Path(holdings_sync.FUND_DB_PATH).exists():
+    import sqlite3
+    import tempfile
+    _fund = Path(tempfile.mkdtemp()) / "fund_empty.db"
+    with sqlite3.connect(_fund) as _c:
+        _c.execute("CREATE TABLE binance_fills (binance_trade_id INTEGER, symbol TEXT, "
+                   "position_side TEXT, side TEXT, qty REAL, price REAL, quote_qty REAL, "
+                   "fill_time INTEGER)")
+    holdings_sync.FUND_DB_PATH = str(_fund)
+    print(f"  NOTE  本机无 fund.db → 用合成空库（无币安持仓）：{_fund}")
 
 failures = []
 
