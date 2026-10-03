@@ -73,6 +73,14 @@ async function api(path, opts = {}) {
   return r.json();
 }
 
+// 图表 tooltip 外观的唯一来源：白底、细描边、柔阴影，与卡片同一套语汇。
+// 各图只在此基础上加 trigger / axisPointer / formatter，别再写一份默认样式。
+const TIP = {
+  confine: true, backgroundColor: "#FFFFFF", borderColor: "#DDDAD2",
+  borderWidth: 1, padding: [8, 10], textStyle: { color: "#26241F", fontSize: 12 },
+  extraCssText: "box-shadow:0 4px 14px rgba(38,36,31,.10);border-radius:6px;line-height:1.7",
+};
+
 createApp({
   data: () => ({
     view: "boot",
@@ -503,6 +511,49 @@ createApp({
                  position: "insideStartTop", fontSize: 9, color },
         lineStyle: { color, type: "solid", width: 1 },
       })) : [];
+      // 悬停读数：扇形带是堆叠面积（序列里存的是相邻分位的差值），默认 tooltip 会把
+      // 「Q05-Q25 49.8」这种带宽当分位值显示——误导。这里一律回到 f.q 原始价位，
+      // 行序与图上自上而下一致（Q95→Q05），并标出收盘落在哪一档。
+      const QS = ["q95", "q75", "q50", "q25", "q05"];
+      const flag = { gate: new Set(f.gate_fail_dates), roll: new Set(f.roll_dates),
+                     bi: new Set(f.bimodal_dates) };
+      const num = v => (v == null ? "—" : Number(v).toFixed(1));
+      const zone = i => {
+        const c = closes[i], q = k => f.q[k][i];
+        if (c == null || QS.some(k => q(k) == null)) return "";
+        if (c < q("q05")) return "低于 Q05";
+        if (c < q("q25")) return "Q05–Q25 之间";
+        if (c < q("q50")) return "Q25–Q50 之间";
+        if (c < q("q75")) return "Q50–Q75 之间";
+        if (c <= q("q95")) return "Q75–Q95 之间";
+        return "高于 Q95";
+      };
+      const kv = (label, value, strong) =>
+        `<div style="display:flex;justify-content:space-between;gap:22px${strong ? ";font-weight:600" : ""}">`
+        + `<span style="color:${strong ? "#26241F" : "#6E6A60"}">${label}</span>`
+        + `<span style="font-variant-numeric:tabular-nums">${value}</span></div>`;
+      const fanTip = {
+        ...TIP, trigger: "axis",
+        axisPointer: { type: "line", lineStyle: { color: "#8B877C", width: 1 } },
+        formatter: ps => {
+          if (!Array.isArray(ps) || !ps.length) return "";
+          const i = ps[0].dataIndex, d = dates[i], z = zone(i);
+          const notes = [
+            flag.gate.has(d) && `<span style="color:#A33B2E">闸门未过 · 分位仅供参考</span>`,
+            flag.roll.has(d) && "roll 换月日",
+            flag.bi.has(d) && "双峰",
+          ].filter(Boolean);
+          const swatch = `<span style="display:inline-block;width:12px;height:2px;`
+            + `background:#2F6B8F;vertical-align:middle;margin-right:7px"></span>`;
+          return `<div style="color:#6E6A60;font-size:11px">${d}`
+            + (notes.length ? ` · ${notes.join(" · ")}` : "") + `</div>`
+            + kv(`${swatch}收盘`, num(closes[i]), true)
+            + (z ? `<div style="color:#6E6A60;font-size:11px;margin:-2px 0 0 19px">位于 ${z}</div>` : "")
+            + `<div style="border-top:1px dashed #E4E1D9;margin:6px 0 3px"></div>`
+            + QS.map(k => kv(k === "q50" ? "Q50 中位" : k.toUpperCase(),
+                             num(f.q[k][i]), k === "q50")).join("");
+        },
+      };
       const ys = [...closes.filter(v => v != null), ...f.q.q05, ...f.q.q95];
       this.chart("fanChart")?.setOption({
         animation: false,
@@ -510,7 +561,7 @@ createApp({
         xAxis: { type: "category", data: dates, axisLabel: { fontSize: 10 } },
         yAxis: { type: "value", min: Math.floor(Math.min(...ys) * 0.99),
                  max: Math.ceil(Math.max(...ys) * 1.01), axisLabel: { fontSize: 10 } },
-        tooltip: { trigger: "axis", confine: true },
+        tooltip: fanTip,
         series: [
           { name: "Q05", type: "line", stack: "band", data: f.q.q05, symbol: "none",
             lineStyle: { width: 1, type: "dashed", color: "#B3AFA4" } },
@@ -544,7 +595,7 @@ createApp({
         xAxis: { type: "value", min: d.strikes[0], max: d.strikes[d.strikes.length - 1],
                  axisLabel: { fontSize: 9 } },
         yAxis: { type: "value", show: false },
-        tooltip: { trigger: "axis", confine: true,
+        tooltip: { ...TIP, trigger: "axis",
                    formatter: p => `K=${p[0].value[0].toFixed(0)}` },
         series: [{
           type: "line", data: d.strikes.map((k, i) => [k, d.density[i]]),
@@ -899,9 +950,7 @@ createApp({
                  axisLabel: { fontSize: 10, color: "#8B877C", formatter: v => Math.round(v * 100) + "%" },
                  splitLine: { lineStyle: { color: "#EFEDE8" } } },
         tooltip: {
-          trigger: "axis", confine: true, backgroundColor: "#FFFFFF", borderColor: "#DDDAD2",
-          borderWidth: 1, padding: [8, 10], textStyle: { color: "#26241F", fontSize: 12 },
-          extraCssText: "box-shadow:0 4px 14px rgba(38,36,31,.10);border-radius:6px;line-height:1.7",
+          ...TIP, trigger: "axis",
           axisPointer: { type: "line", snap: false, lineStyle: { color: "#8B877C", width: 1 },
                          label: { show: false } },
           formatter: (ps) => {
