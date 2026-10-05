@@ -100,6 +100,7 @@ def test_push_partial_stale():
          mock.patch.object(push_daily.alerts, "stale_symbols",
                            return_value=[("SPY", "2026-08-28")]), \
          mock.patch.object(push_daily.alerts, "todays_anomalies", return_value=items), \
+         mock.patch.object(push_daily.assistant, "build_packs", return_value={}), \
          mock.patch.object(push_daily.assistant, "build_outlook_messages",
                            return_value=({"system": "s", "user": "u"}, "2026-09-01")), \
          mock.patch.object(push_daily.assistant, "generate",
@@ -121,6 +122,7 @@ def test_push_fresh():
                            return_value=(dt.date(2026, 9, 1), 640.0)), \
          mock.patch.object(push_daily.alerts, "stale_symbols", return_value=[]), \
          mock.patch.object(push_daily.alerts, "todays_anomalies", return_value=items), \
+         mock.patch.object(push_daily.assistant, "build_packs", return_value={}), \
          mock.patch.object(push_daily.assistant, "build_outlook_messages",
                            return_value=({"system": "s", "user": "u"}, "2026-09-01")), \
          mock.patch.object(push_daily.assistant, "generate", return_value="outlook"), \
@@ -139,6 +141,7 @@ def test_guard_fails_open():
          mock.patch.object(push_daily.fetch, "latest_trading_day",
                            side_effect=RuntimeError("gRPC down")), \
          mock.patch.object(push_daily.alerts, "todays_anomalies", return_value=items), \
+         mock.patch.object(push_daily.assistant, "build_packs", return_value={}), \
          mock.patch.object(push_daily.assistant, "build_outlook_messages",
                            return_value=({"system": "s", "user": "u"}, "2026-09-01")), \
          mock.patch.object(push_daily.assistant, "generate", return_value="outlook"), \

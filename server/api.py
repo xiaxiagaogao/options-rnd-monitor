@@ -218,7 +218,7 @@ def assistant(payload: dict = Body(...)):
         raise HTTPException(404, f"{symbol} 无可用数据")
     msg = asst.build_messages(ctx, question)
     try:
-        answer = asst.generate(msg["system"], msg["user"])
+        answer = asst.generate_checked(msg, {symbol: ctx})
     except asst.AssistantNotConfigured as e:
         raise HTTPException(503, str(e))
     except asst.AssistantError as e:
@@ -232,11 +232,12 @@ def assistant_outlook():
     """全量市场展望（C++）：对所有自选标的出一版有净判断的 outlook（framework §2.3 精神）。"""
     from . import assistant as asst
     syms = q.get_symbols()
-    msg, asof = asst.build_outlook_messages(syms)
+    packs = asst.build_packs(syms)
+    msg, asof = asst.build_outlook_messages(syms, packs=packs)
     if not asof:
         raise HTTPException(404, "无可用数据")
     try:
-        answer = asst.generate(msg["system"], msg["user"])
+        answer = asst.generate_checked(msg, packs)
     except asst.AssistantNotConfigured as e:
         raise HTTPException(503, str(e))
     except asst.AssistantError as e:

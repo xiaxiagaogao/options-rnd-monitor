@@ -6,6 +6,7 @@
 """
 import json
 import os
+import re
 from pathlib import Path
 
 from rnd.state import STATE_INDICATORS
@@ -43,6 +44,10 @@ SYSTEM_PROMPT = """\
 - 你只能引用「上下文包」里已给的字段、单位、已算分位与 Δ。**数值只能取自包内，不得自算。**
 - 禁止心算或重算 IV、密度、分位、σ、PIT；禁止改写数值或凭空 invent 未提供的字段。
 - 包里没有的（如 OI、GEX、VRP、财报日历），直说「本系统无此数据」，不推测、不脑补。
+- **方向以白话为准**：state[].reading、benchmark.state_reading、events[].reading 是代码按指标定义
+  （definition）预写的方向描述。贵/便宜、左偏轻/重、倒挂与否一律以它为准，**不得自行从分位数推断方向**
+  ——P 高只表示原始值大，不等于「X 贵」。例：rr25 = IV(25Δ 看涨) − IV(25Δ 看跌)，
+  指数 rr25 分位高 = 看跌保护相对看涨便宜，不是 put 贵。
 
 ## 九条纪律
 1. 冻结线写入后不可变；偏移量 (现Q−冻结Q)/σ1 是加减仓信息，不是重画失效线的借口。
@@ -92,13 +97,18 @@ def build_messages(ctx: dict, question: str) -> dict:
     return {"system": SYSTEM_PROMPT, "user": user}
 
 
-def build_digest_messages(symbols: list[str]) -> tuple[dict, str | None]:
+def build_packs(symbols: list[str]) -> dict:
+    """多标的上下文包 {symbol: ctx}；币安持仓只读一次共用。"""
+    holdings = load_holdings()
+    return {s: build_context(s, holdings=holdings) for s in symbols}
+
+
+def build_digest_messages(symbols: list[str], packs: dict | None = None) -> tuple[dict, str | None]:
     """多标的 → 一条 TG 纯文本综合收盘摘要（framework §2.3；用户选"一条综合摘要"）。
 
     复用九纪律 SYSTEM_PROMPT，只把 ask 换成"多标的短摘要、纯文本无表格"。返回 (messages, asof)。
     """
-    holdings = load_holdings()
-    packs = {s: build_context(s, holdings=holdings) for s in symbols}
+    packs = packs if packs is not None else build_packs(symbols)
     asof = next((p["meta"]["asof"] for p in packs.values() if p["meta"].get("asof")), None)
     body = json.dumps(packs, ensure_ascii=False, indent=2, default=str)
     user = (
@@ -115,15 +125,15 @@ def build_digest_messages(symbols: list[str]) -> tuple[dict, str | None]:
     return {"system": SYSTEM_PROMPT, "user": user}, asof
 
 
-def build_outlook_messages(symbols: list[str]) -> tuple[dict, str | None]:
+def build_outlook_messages(symbols: list[str], packs: dict | None = None) -> tuple[dict, str | None]:
     """全量市场展望（C++ 决断度；2026-07-22 两版原型人工锁定）。
 
     比 digest 更进一步：板块基调总纲 + 每标的精悍净判断 + 对已有持仓论点的顺逆风判定
     + 情景触发。红线焊死——描述定价环境偏向可以，给买卖/加减/对冲/仓位动作不行、不预测涨跌。
-    复用九纪律 SYSTEM_PROMPT。返回 (messages, asof)。
+    复用九纪律 SYSTEM_PROMPT。packs 由调用方传入时可复用于 generate_checked 的方向自检。
+    返回 (messages, asof)。
     """
-    holdings = load_holdings()
-    packs = {s: build_context(s, holdings=holdings) for s in symbols}
+    packs = packs if packs is not None else build_packs(symbols)
     asof = next((p["meta"]["asof"] for p in packs.values() if p["meta"].get("asof")), None)
     body = json.dumps(packs, ensure_ascii=False, indent=2, default=str)
     user = (
@@ -137,7 +147,8 @@ def build_outlook_messages(symbols: list[str]) -> tuple[dict, str | None]:
         "【每标的：3-4 行，精悍别啰嗦】\n"
         "- **净判断（狠、决断）**：定价环境是什么性质，且在往哪走（升级/恶化/缓和/转向/维持）"
         "——不要「偏X」的温吞，要「X，且在Y」。\n"
-        "- 支撑：只挑 1-2 个最有信息量的读数论证（点名不对称、跨指数对照、日环比），别铺全指标。\n"
+        "- 支撑：只挑 1-2 个最有信息量的读数论证（点名不对称、跨指数对照、日环比），别铺全指标。"
+        "方向（贵/便宜、左偏轻/重）照 reading 写，不从 P 分位自己推。\n"
         "- **情景触发**：一条「若…则…」。\n"
         "- 有持仓的标的：这套定价对你的论点是**逆风 / 顺风 / 中性**（挂失效线、偏移）"
         "——判定顺逆风可以，给动作不行。\n"
@@ -196,6 +207,87 @@ def generate(system: str, user: str, *, max_tokens: int = 16000) -> str:
         raise AssistantError(
             f"模型 {ASSISTANT_MODEL} 未产出正文（stop_reason={resp.stop_reason}）"
             "——多为思考耗尽 max_tokens；请调大 max_tokens 或换非思考型模型")
+    return text
+
+
+# ---------- 方向反例自检（2026-10：展望连续一周把指数 rr25 P99 写成「put 翼极贵」）----------
+
+_INDEX_SYMBOLS = ("SPY", "QQQ")
+_INDEX_WORDS = re.compile(r"宽基|指数|大盘")
+_CLAUSE = re.compile(r"[，。；！？,;!?\n]")
+_NC = r"[^，。；！？,;!?\n]"   # 子句内任意字符
+# (指标, 反例说法, 该说法在什么分位下与 reading 相反)。只抓「极贵 / 最便宜」这类水平断言，
+# 不抓「在变贵」这类日变说法——分位从 P99 掉到 P80 时「左偏在加深」是对的。
+_CONFLICTS = (
+    ("rr25", re.compile(
+        rf"(?:put|看跌|下翼|左翼){_NC}{{0,8}}?(?:极贵|最贵|很贵|昂贵|极端溢价)"
+        rf"|极度偏\s*(?:put|看跌)"
+        rf"|(?:保险|担忧|恐慌|对冲){_NC}{{0,6}}(?:全押|押满|挤|集中){_NC}{{0,6}}(?:下翼|左翼|put)",
+        re.I), lambda p: p >= 75),
+    ("rr25", re.compile(rf"(?:put|看跌){_NC}{{0,8}}?(?:极便宜|最便宜|很便宜|廉价)", re.I),
+     lambda p: p <= 25),
+    ("bowley_skew", re.compile(rf"极度左偏|左偏{_NC}{{0,8}}?(?:极端|最重|最深|拉满)"),
+     lambda p: p >= 75),
+    ("bowley_skew", re.compile(rf"极度右偏|左偏{_NC}{{0,8}}?(?:最轻|最浅)"),
+     lambda p: p <= 25),
+)
+
+
+def _direction_table(packs: dict) -> dict:
+    """{symbol: {indicator: (pct, reading)}}；各包 benchmark 里的指数也收进来（个股助手会提到它）。"""
+    tab = {sym: {s["indicator"]: (s.get("pct"), s.get("reading")) for s in p.get("state") or []}
+           for sym, p in packs.items()}
+    for p in packs.values():
+        b = p.get("benchmark") or {}
+        if b.get("symbol") and b["symbol"] not in tab:
+            pct, rd = b.get("state_pct") or {}, b.get("state_reading") or {}
+            tab[b["symbol"]] = {k: (pct.get(k), rd.get(k)) for k in pct}
+    return tab
+
+
+def direction_conflicts(text: str, packs: dict) -> list[str]:
+    """生成文本里与上下文方向白话相反的说法（关键词级反例检查）。
+
+    按子句扫：子句点名的标的（「宽基 / 指数 / 大盘」= SPY、QQQ）即归属；没点名的沿用
+    最近一次点名。归属标的的分位**全部**落在反向区间才算命中——一句话同时说个股和指数时
+    不误伤。返回可直接塞进纠错提示的描述串。
+    """
+    tab = _direction_table(packs)
+    names = {s: re.compile(rf"(?<![A-Za-z]){re.escape(s)}(?![A-Za-z])") for s in tab}
+    hits, last = [], []
+    for clause in _CLAUSE.split(text):
+        named = [s for s, rx in names.items() if rx.search(clause)]
+        if _INDEX_WORDS.search(clause):
+            named += [s for s in _INDEX_SYMBOLS if s in tab and s not in named]
+        targets = named or last
+        last = named or last
+        for ind, rx, against in _CONFLICTS:
+            if not targets or not rx.search(clause):
+                continue
+            rows = [(s, *tab[s].get(ind, (None, None))) for s in targets]
+            if all(p is not None and against(p) for _, p, _ in rows):
+                why = "；".join(f"{s} {q.LABELS.get(ind, ind)} P{p:.0f} = {r or ''}"
+                               for s, p, r in rows)
+                hits.append(f"『{clause.strip()}』与上下文方向相反——{why}")
+    return hits
+
+
+def generate_checked(msg: dict, packs: dict, **kw) -> str:
+    """generate + 方向反例自检：命中 → 带纠错重写一次；重写仍命中 → 末尾挂警告照发（不吞推送）。"""
+    text = generate(msg["system"], msg["user"], **kw)
+    hits = direction_conflicts(text, packs)
+    if not hits:
+        return text
+    print(f"[方向自检] 首版命中 {len(hits)} 处，带纠错重写一次：", *hits, sep="\n  ")
+    retry = (msg["user"] + "\n\n【方向纠错】上一版以下表述与上下文 reading 的方向相反：\n"
+             + "\n".join(f"- {h}" for h in hits)
+             + "\n方向一律以 reading 为准，重写全文，其余要求不变。")
+    text = generate(msg["system"], retry, **kw)
+    hits = direction_conflicts(text, packs)
+    if hits:
+        print(f"[方向自检] 重写后仍命中 {len(hits)} 处，挂警告发出：", *hits, sep="\n  ")
+        text += ("\n\n⚠ 方向自检未通过——以下表述与数据方向相反，以面板为准：\n"
+                 + "\n".join(f"· {h}" for h in hits))
     return text
 
 
@@ -276,8 +368,75 @@ def _location(ind: dict | None) -> dict:
     }
 
 
+def _deg(pct: float, hi: str, lo: str) -> str:
+    """分位 → 程度短语；hi / lo 是分位高端 / 低端对应的形容词。"""
+    if pct >= 90:
+        return f"处于一年最{hi}之列"
+    if pct >= 75:
+        return f"比一年中多数日子{hi}"
+    if pct > 25:
+        return "处于一年常态区间"
+    if pct > 10:
+        return f"比一年中多数日子{lo}"
+    return f"处于一年最{lo}之列"
+
+
+# 方向单调的指标：主语 + 分位高端 / 低端的形容词
+_PLAIN_DIRECTION = {
+    "atm_iv": ("隐含波动率（期权整体价格）", "高", "低"),
+    "ex_kurt": ("尾部肥度（超额峰度）", "高", "低"),
+    "bf25": ("两翼相对 ATM 的溢价（smile 曲率）", "高", "低"),
+    "term_slope": ("近月相对次月的 IV 溢价（事件压力）", "高", "低"),
+    "tail_p_down": ("跌破 F·(1−x) 的 RN 概率", "高", "低"),
+    "tail_p_up": ("涨破 F·(1+x) 的 RN 概率", "高", "低"),
+}
+
+
+def direction_reading(indicator: str, value, pct) -> str:
+    """把 (原始值, 分位) 翻成方向白话，喂给模型照抄，不让它从分位自己推方向。
+
+    分位对原始值算（rnd/state.py），分位高 = 原始值大。负值指标（指数 rr25、偏度）在这里
+    最容易读反：SPY rr25 = −0.022 / P99 是「看跌保护相对看涨一年最便宜」，不是「put 贵」。
+    value 为 None 时（如事件只带分位）只给分位方向、不给符号句。
+    """
+    if pct is None:
+        return "无分位（样本<60、闸门未过或当日无读数）：不陈述分位方向"
+    mid = 25 < pct < 75
+    if indicator == "rr25":
+        core = f"看跌保护相对看涨{_deg(pct, '便宜', '贵')}"
+        sign = gloss = None
+        if value is not None and value < 0:
+            sign = f"rr25<0：看跌翼 IV {'仍' if pct >= 75 else ''}高于看涨翼"
+            gloss = f"看跌偏斜{_deg(pct, '平', '陡')}"
+        elif value is not None and value > 0:
+            sign = "rr25>0：看涨翼 IV 高于看跌翼"
+            gloss = f"看涨溢价{_deg(pct, '高', '低')}"
+        out = core if mid or gloss is None else f"{core}（{gloss}）"
+        return f"{sign}；{out}" if sign else out
+    if indicator in ("skew", "log_skew", "bowley_skew"):
+        sign = None
+        if mid:
+            core = "偏度处于一年常态区间"
+        elif value is not None and value < 0:
+            core = f"左偏程度{_deg(pct, '轻', '重')}"
+        elif value is not None and value > 0:
+            core = f"右偏程度{_deg(pct, '重', '轻')}"
+        else:
+            core = f"偏度{_deg(pct, '高', '低')}"
+        if value is not None and value != 0:
+            sign = f"{indicator}{'<' if value < 0 else '>'}0：分布{'左' if value < 0 else '右'}偏"
+        if not mid:
+            core += f"（相对一年历史更{'右' if pct >= 75 else '左'}偏）"
+        return f"{sign}；{core}" if sign else core
+    subject, hi, lo = _PLAIN_DIRECTION[indicator]
+    core = f"{subject}{_deg(pct, hi, lo)}"
+    if indicator == "term_slope" and value is not None and value != 0:
+        return f"{'近月 IV 高于次月（倒挂）' if value > 0 else '近月 IV 低于次月（正向结构）'}；{core}"
+    return core
+
+
 def _state(states: list[dict]) -> list[dict]:
-    """10 个状态指标 × value/pct/dpct/sample_n + saying/label，按 STATE_INDICATORS 排序。"""
+    """10 个状态指标 × value/pct/dpct/sample_n + saying/label + 方向定义/方向白话，按 STATE_INDICATORS 排序。"""
     by_ind = {s["indicator"]: s for s in states}
     out = []
     for ind_name in STATE_INDICATORS:
@@ -291,6 +450,8 @@ def _state(states: list[dict]) -> list[dict]:
             "sample_n": s.get("sample_n"),
             "label": q.LABELS.get(ind_name, ind_name),
             "saying": q.SAYINGS.get(ind_name, ""),
+            "definition": q.DIRECTION.get(ind_name, ""),
+            "reading": direction_reading(ind_name, s.get("value"), s.get("pct")),
         })
     return out
 
@@ -310,10 +471,13 @@ def _quality(ind: dict | None) -> dict:
 
 def _benchmark(bench: str, bench_states: list[dict]) -> dict:
     """指数基准并排状态（framework §3.3；异动须与指数并排 §1.1-6）。"""
-    pct = {s["indicator"]: s["pct"] for s in bench_states}
+    by_ind = {s["indicator"]: s for s in bench_states}
+    pct = {k: by_ind.get(k, {}).get("pct") for k in STATE_INDICATORS}
     return {
         "symbol": bench,
-        "state_pct": {ind_name: pct.get(ind_name) for ind_name in STATE_INDICATORS},
+        "state_pct": pct,
+        "state_reading": {k: direction_reading(k, by_ind.get(k, {}).get("value"), pct[k])
+                          for k in STATE_INDICATORS},
     }
 
 
@@ -424,10 +588,14 @@ def _binance_position(c, symbol: str, asof: str | None, ind: dict | None,
 
 
 def _events(symbol: str, asof: str | None) -> list[dict]:
-    """近窗事件，与仪表盘 events 同源口径（framework §3.3）。"""
+    """近窗事件，与仪表盘 events 同源口径（framework §3.3）；分位越线事件补方向白话。"""
     if not asof:
         return []
-    return q.events(symbol, days=90).get("events", [])
+    evs = q.events(symbol, days=90).get("events", [])
+    for e in evs:
+        if e.get("kind") == "extreme" and e.get("indicator"):
+            e["reading"] = direction_reading(e["indicator"], None, e.get("pct"))
+    return evs
 
 
 def _summary(symbol: str, asof: str | None, ind: dict | None) -> dict:

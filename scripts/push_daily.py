@@ -66,9 +66,11 @@ def run(symbols: list[str] | None = None, *, do_digest: bool = True, dry: bool =
 
     # 2. 全量市场展望（C++ outlook，Fable max，1–3 分钟）——每日汇报复用此模式
     if do_digest:
-        msg, asof = assistant.build_outlook_messages(syms)
+        packs = assistant.build_packs(syms)
+        msg, asof = assistant.build_outlook_messages(syms, packs=packs)
         # 模型按模板自带标题+口径日期，不再叠加脚本头，避免双标题。
-        outlook = assistant.generate(msg["system"], msg["user"])
+        # 方向写反（如把指数 rr25 P99 写成 put 贵）→ 带纠错重写一次，仍反则挂警告照发。
+        outlook = assistant.generate_checked(msg, packs)
         print("--- 市场展望 ---\n" + outlook)
         if not dry:
             telegram.send(outlook)

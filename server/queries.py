@@ -13,7 +13,7 @@ from rnd.state import STATE_INDICATORS
 # 指标白话（spec §4 说明列的 UI 化）
 SAYINGS = {
     "atm_iv": "等价 IV rank——高分位防 vol crush，低分位适合埋伏",
-    "rr25": "put/call 翼相对价——独立口径情绪计",
+    "rr25": "call−put 翼相对价——独立口径情绪计",
     "skew": "分布本身的不对称（含对数正态基线）",
     "log_skew": "纯 smile 驱动口径，与 RR 互为校验",
     "bowley_skew": "分位数口径的稳健版偏度——翼部噪声免疫",
@@ -28,6 +28,23 @@ LABELS = {
     "log_skew": "偏度（对数）", "bowley_skew": "偏度（Bowley）", "ex_kurt": "超额峰度",
     "bf25": "25Δ 蝶式", "term_slope": "期限结构斜率",
     "tail_p_down": "下尾概率", "tail_p_up": "上尾概率",
+}
+# 方向口径：公式 + 分位朝哪边。分位是对原始值算的（rnd/state.py），所以「分位越高」= 原始值越大；
+# 负值指标（指数 rr25、偏度）负得越少分位越高——研究助手曾在这里把方向读反（2026-10）。
+DIRECTION = {
+    "atm_iv": "ATM 隐含波动率；分位越高 = 期权整体越贵",
+    "rr25": "rr25 = IV(25Δ 看涨) − IV(25Δ 看跌)；分位越高 = 看涨翼相对越贵、看跌保护相对越便宜"
+            "（指数 rr25 常为负：负得越少，分位越高）",
+    "skew": "价格空间三阶矩偏度（含对数正态基线）；分位越高 = 分布越右偏 / 左偏越轻",
+    "log_skew": "对数收益空间偏度（基线归零）；分位越高 = 分布越右偏 / 左偏越轻",
+    "bowley_skew": "Bowley 偏度 = ((Q95−Q50) − (Q50−Q05)) / (Q95−Q05)；"
+                   "分位越高 = 分布越右偏 / 左偏越轻",
+    "ex_kurt": "超额峰度；分位越高 = 尾部越肥",
+    "bf25": "bf25 = (IV25c + IV25p)/2 − ATM IV；分位越高 = 两翼相对 ATM 越贵（smile 越弯）",
+    "term_slope": "term_slope = 近月 ATM IV − 次月 ATM IV（>0 为倒挂）；"
+                  "分位越高 = 近月相对次月越贵、事件压力越大",
+    "tail_p_down": "P(S < F·(1−x))，指数 x=5%、个股 x=10%；分位越高 = 市场给大跌的 RN 概率越高",
+    "tail_p_up": "P(S > F·(1+x))，指数 x=5%、个股 x=10%；分位越高 = 市场给大涨的 RN 概率越高",
 }
 
 
@@ -411,11 +428,11 @@ def events(symbol: str | None = None, days: int = 90) -> dict:
             for i in range(1, len(p)):
                 if p[i] >= 90 and p[i - 1] < 90:
                     evs.append({"date": dts[i], "symbol": sym, "kind": "extreme",
-                                "glyph": "⚠", "pct": p[i],
+                                "glyph": "⚠", "pct": p[i], "indicator": ind_name,
                                 "text": f"{LABELS.get(ind_name, ind_name)} 升至 P{p[i]:.0f}"})
                 elif p[i] <= 10 and p[i - 1] > 10:
                     evs.append({"date": dts[i], "symbol": sym, "kind": "extreme",
-                                "glyph": "⚠", "pct": p[i],
+                                "glyph": "⚠", "pct": p[i], "indicator": ind_name,
                                 "text": f"{LABELS.get(ind_name, ind_name)} 降至 P{p[i]:.0f}"})
     evs.sort(key=lambda e: e["date"], reverse=True)
     c.close()
