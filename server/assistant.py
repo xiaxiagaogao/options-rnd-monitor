@@ -214,22 +214,38 @@ def generate(system: str, user: str, *, max_tokens: int = 16000) -> str:
 
 _INDEX_SYMBOLS = ("SPY", "QQQ")
 _INDEX_WORDS = re.compile(r"宽基|指数|大盘")
+_STOCK_WORDS = re.compile(r"个股|成分")
 _CLAUSE = re.compile(r"[，。；！？,;!?\n]")
 _NC = r"[^，。；！？,;!?\n]"   # 子句内任意字符
-# (指标, 反例说法, 该说法在什么分位下与 reading 相反)。只抓「极贵 / 最便宜」这类水平断言，
-# 不抓「在变贵」这类日变说法——分位从 P99 掉到 P80 时「左偏在加深」是对的。
+# (反例说法, 条件)：归属标的的条件全部成立时，该说法与 reading 相反。只抓「极贵 / 到顶 / 全押」
+# 这类水平断言，不抓「在变贵」这类日变说法——分位从 P99 掉到 P80 时「左偏在加深」是对的；
+# 也不抓光秃秃的「put 翼贵」——rr25<0 时看跌翼 IV 本来就高于看涨翼，按符号说是对的。
+# 样本取自 2026-09-17 ~ 10-03 eod.log 的展望原句（tests/test_state_direction.py）。
+_RR_HIGH = ("rr25", lambda p: p >= 75)
 _CONFLICTS = (
-    ("rr25", re.compile(
+    (re.compile(
         rf"(?:put|看跌|下翼|左翼){_NC}{{0,8}}?(?:极贵|最贵|很贵|昂贵|极端溢价)"
+        rf"|(?:RR|rr25|风险反转){_NC}{{0,10}}?(?:高分位|P(?:[89]\d|100)){_NC}{{0,4}}?"
+        rf"(?:说|=|即|意味着?|代表)\s*(?:put|看跌|下行){_NC}{{0,4}}贵"
+        rf"|(?:最贵|极贵|很贵)的(?:下行翼|下行保护|下翼|左翼|put|看跌)"
         rf"|极度偏\s*(?:put|看跌)"
-        rf"|(?:保险|担忧|恐慌|对冲){_NC}{{0,6}}(?:全押|押满|挤|集中){_NC}{{0,6}}(?:下翼|左翼|put)",
-        re.I), lambda p: p >= 75),
-    ("rr25", re.compile(rf"(?:put|看跌){_NC}{{0,8}}?(?:极便宜|最便宜|很便宜|廉价)", re.I),
-     lambda p: p <= 25),
-    ("bowley_skew", re.compile(rf"极度左偏|左偏{_NC}{{0,8}}?(?:极端|最重|最深|拉满)"),
-     lambda p: p >= 75),
-    ("bowley_skew", re.compile(rf"极度右偏|左偏{_NC}{{0,8}}?(?:最轻|最浅)"),
-     lambda p: p <= 25),
+        rf"|(?:抢购|在买|买入)(?:下跌保险|下行保护|下行翼|左翼|下翼|put|看跌)"
+        rf"|保护{_NC}{{0,4}}抢筹"
+        rf"|避险(?:定价|需求)?{_NC}{{0,2}}(?:到顶|拉满|极贵|最贵|很贵)"
+        rf"|(?:下行|看跌)偏斜{_NC}{{0,12}}?(?:高位|到顶|一年顶|最陡|极端)"
+        rf"|(?:下行|看跌)偏斜{_NC}{{0,8}}?P(?:9\d|100)"
+        rf"|(?:保险|担忧|恐慌|对冲|溢价){_NC}{{0,10}}(?:全押|押满|全压|挤|集中)"
+        rf"{_NC}{{0,6}}(?:下翼|左翼|左边|左侧|put)",
+        re.I), (_RR_HIGH,)),
+    # 「保险贵」也可能在说下尾概率；下尾概率也不高时才算反例
+    (re.compile(rf"保险(?:定价)?(?:很|极|偏|太)?(?:贵|到顶)|保险{_NC}{{0,4}}天花板"),
+     (_RR_HIGH, ("tail_p_down", lambda p: p <= 50))),
+    (re.compile(rf"(?:put|看跌){_NC}{{0,8}}?(?:极便宜|最便宜|很便宜|廉价)", re.I),
+     (("rr25", lambda p: p <= 25),)),
+    (re.compile(rf"极度左偏|左偏{_NC}{{0,8}}?(?:极端|最重|最深|拉满|到顶|一年顶|年内高位|一年高位)"),
+     (("bowley_skew", lambda p: p >= 75),)),
+    (re.compile(rf"极度右偏|左偏{_NC}{{0,8}}?(?:最轻|最浅)"),
+     (("bowley_skew", lambda p: p <= 25),)),
 )
 
 
@@ -249,8 +265,8 @@ def direction_conflicts(text: str, packs: dict) -> list[str]:
     """生成文本里与上下文方向白话相反的说法（关键词级反例检查）。
 
     按子句扫：子句点名的标的（「宽基 / 指数 / 大盘」= SPY、QQQ）即归属；没点名的沿用
-    最近一次点名。归属标的的分位**全部**落在反向区间才算命中——一句话同时说个股和指数时
-    不误伤。返回可直接塞进纠错提示的描述串。
+    最近一次点名，泛指「个股 / 成分股」的子句不归属、也打断沿用。归属标的的分位**全部**
+    落在反向区间才算命中——一句话同时说个股和指数时不误伤。返回可直接塞进纠错提示的描述串。
     """
     tab = _direction_table(packs)
     names = {s: re.compile(rf"(?<![A-Za-z]){re.escape(s)}(?![A-Za-z])") for s in tab}
@@ -259,16 +275,21 @@ def direction_conflicts(text: str, packs: dict) -> list[str]:
         named = [s for s, rx in names.items() if rx.search(clause)]
         if _INDEX_WORDS.search(clause):
             named += [s for s in _INDEX_SYMBOLS if s in tab and s not in named]
+        if not named and _STOCK_WORDS.search(clause):
+            last = []
+            continue
         targets = named or last
         last = named or last
-        for ind, rx, against in _CONFLICTS:
+        for rx, conds in _CONFLICTS:
             if not targets or not rx.search(clause):
                 continue
-            rows = [(s, *tab[s].get(ind, (None, None))) for s in targets]
-            if all(p is not None and against(p) for _, p, _ in rows):
+            rows = [(s, ind, test, *tab[s].get(ind, (None, None)))
+                    for s in targets for ind, test in conds]
+            if all(p is not None and test(p) for _, _, test, p, _ in rows):
                 why = "；".join(f"{s} {q.LABELS.get(ind, ind)} P{p:.0f} = {r or ''}"
-                               for s, p, r in rows)
+                               for s, ind, _, p, r in rows)
                 hits.append(f"『{clause.strip()}』与上下文方向相反——{why}")
+                break   # 一个子句报一次
     return hits
 
 
@@ -392,15 +413,35 @@ _PLAIN_DIRECTION = {
 }
 
 
-def direction_reading(indicator: str, value, pct) -> str:
-    """把 (原始值, 分位) 翻成方向白话，喂给模型照抄，不让它从分位自己推方向。
+def direction_reading(indicator: str, value, pct, dpct=None) -> str:
+    """把 (原始值, 分位, 日环比分位Δ) 翻成方向白话，喂给模型照抄，不让它从分位自己推方向。
 
     分位对原始值算（rnd/state.py），分位高 = 原始值大。负值指标（指数 rr25、偏度）在这里
-    最容易读反：SPY rr25 = −0.022 / P99 是「看跌保护相对看涨一年最便宜」，不是「put 贵」。
-    value 为 None 时（如事件只带分位）只给分位方向、不给符号句。
+    最容易读反：SPY rr25 = −0.022 / P99 是「看跌保护相对看涨一年最便宜」，不是「put 贵」；
+    日环比同理，rr25 Δ+11.6 是「看跌保护在变便宜」，不是「put 翼溢价在堆」。
+    value 为 None 时（如事件只带分位）只给分位方向、不给符号句；|Δ|<1 不写日环比。
     """
     if pct is None:
         return "无分位（样本<60、闸门未过或当日无读数）：不陈述分位方向"
+    out = _level_reading(indicator, value, pct)
+    if dpct is not None and abs(dpct) >= 1:
+        out += f"；日环比 {dpct:+.1f} 分位：{_delta_reading(indicator, value, dpct > 0)}"
+    return out
+
+
+def _delta_reading(indicator: str, value, up: bool) -> str:
+    if indicator == "rr25":
+        return f"看跌保护相对看涨在变{'便宜' if up else '贵'}"
+    if indicator in ("skew", "log_skew", "bowley_skew"):
+        if value is not None and value < 0:
+            return "左偏在减轻" if up else "左偏在加深"
+        if value is not None and value > 0:
+            return "右偏在加重" if up else "右偏在减轻"
+        return "偏度在走高（往右偏走）" if up else "偏度在走低（往左偏走）"
+    return f"{_PLAIN_DIRECTION[indicator][0]}在走{'高' if up else '低'}"
+
+
+def _level_reading(indicator: str, value, pct: float) -> str:
     mid = 25 < pct < 75
     if indicator == "rr25":
         core = f"看跌保护相对看涨{_deg(pct, '便宜', '贵')}"
@@ -451,7 +492,7 @@ def _state(states: list[dict]) -> list[dict]:
             "label": q.LABELS.get(ind_name, ind_name),
             "saying": q.SAYINGS.get(ind_name, ""),
             "definition": q.DIRECTION.get(ind_name, ""),
-            "reading": direction_reading(ind_name, s.get("value"), s.get("pct")),
+            "reading": direction_reading(ind_name, s.get("value"), s.get("pct"), s.get("dpct")),
         })
     return out
 
@@ -476,7 +517,8 @@ def _benchmark(bench: str, bench_states: list[dict]) -> dict:
     return {
         "symbol": bench,
         "state_pct": pct,
-        "state_reading": {k: direction_reading(k, by_ind.get(k, {}).get("value"), pct[k])
+        "state_reading": {k: direction_reading(k, by_ind.get(k, {}).get("value"), pct[k],
+                                               by_ind.get(k, {}).get("dpct"))
                           for k in STATE_INDICATORS},
     }
 

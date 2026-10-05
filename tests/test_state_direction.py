@@ -37,8 +37,10 @@ def by(entries, ind):
 
 # 2026-10-02 线上 SPY 实测读数
 SPY_STATES = [st("atm_iv", 0.118, 3.0), st("rr25", -0.0222, 99.4),
-              st("bowley_skew", -0.1845, 99.4), st("log_skew", -0.9, 97.0)]
-QQQ_STATES = [st("rr25", -0.0302, 98.6), st("bowley_skew", -0.20, 96.0)]
+              st("bowley_skew", -0.1845, 99.4), st("log_skew", -0.9, 97.0),
+              st("tail_p_down", 0.012, 1.8)]
+QQQ_STATES = [st("rr25", -0.0302, 98.6), st("bowley_skew", -0.20, 96.0),
+              st("tail_p_down", 0.02, 3.0)]
 NVDA_STATES = [st("rr25", -0.09, 6.0), st("bowley_skew", -0.40, 5.0)]   # 合成：个股看跌保护一年最贵
 
 # --- 1. 每个状态指标都有方向定义（公式 + 「分位越高 = …」）---
@@ -86,6 +88,24 @@ check("pct=None → 不陈述方向", "便宜" not in na and "贵" not in na and
 rs = assistant.direction_reading("bowley_skew", 0.10, 95.0)
 check("bowley > 0 / P95 → 右偏程度处于一年最重之列", "右偏程度处于一年最重之列" in rs, rs)
 
+# --- 3b. 日环比方向（09-18 展望把 QQQ「RR 日环比 +11.6 至 P83」写成「put 翼溢价在加速堆」）---
+d1 = assistant.direction_reading("rr25", -0.0302, 83.0, 11.6)
+check("rr25 Δ+11.6 → 日环比看跌保护相对看涨在变便宜",
+      "日环比 +11.6 分位" in d1 and "看跌保护相对看涨在变便宜" in d1, d1)
+d2 = assistant.direction_reading("rr25", -0.05, 40.0, -8.0)
+check("rr25 Δ−8 → 在变贵", "日环比 -8.0 分位" in d2 and "看跌保护相对看涨在变贵" in d2, d2)
+d3 = assistant.direction_reading("bowley_skew", -0.2, 80.0, -6.0)
+check("bowley<0 Δ−6 → 左偏在加深", "左偏在加深" in d3, d3)
+d4 = assistant.direction_reading("bowley_skew", -0.2, 80.0, 6.0)
+check("bowley<0 Δ+6 → 左偏在减轻", "左偏在减轻" in d4, d4)
+d5 = assistant.direction_reading("atm_iv", 0.2, 50.0, 12.0)
+check("atm_iv Δ+12 → 在走高", "隐含波动率（期权整体价格）在走高" in d5, d5)
+check("dpct=None / |Δ|<1 → 不写日环比",
+      "日环比" not in assistant.direction_reading("rr25", -0.02, 99.0, None)
+      and "日环比" not in assistant.direction_reading("rr25", -0.02, 99.0, 0.4))
+check("state 条目把 dpct 带进方向白话",
+      "日环比 +14.4 分位" in by(assistant._state([st("rr25", -0.0222, 99.4, 14.4)]), "rr25")["reading"])
+
 # --- 4. 指数基准块也带方向（个股上下文里的 SPY/QQQ 并排）---
 b = assistant._benchmark("SPY", SPY_STATES)
 check("benchmark 带 state_reading", isinstance(b.get("state_reading"), dict))
@@ -131,20 +151,50 @@ for bad in ["宽基把偏度抬到一年顶（put 翼极贵）",
             "保险全押在指数下翼",
             "担忧被挤进了宽基的左翼",
             "指数层在为 put 翼付极端溢价（SPY RR P95）",
-            "SPY 极度左偏"]:
+            "SPY 极度左偏",
+            # 线上回测漏掉的原句（09-30 / 10-03）
+            "全市场波动率被压到年内地板，但担忧没有消失——它被挤进了宽基的左翼",
+            "指数在买下跌保险，成分股在买上涨彩票",
+            "SPY 翼部左偏坐在年内高位（RR P94 / Bowley P96）",
+            "SPY：翼部避险定价到顶且在微退",
+            "SPY：便宜的不是保护，是整体波动；剩下的那点溢价全压在左边",
+            "SPY：RR/Bowley P99（相对 put 翼最贵）",
+            # 09-21 / 09-23 / 09-24 原句
+            "宽基层（SPY/QQQ）在史低波动率上抢购下行保护——保险恐慌",
+            "SPY：市场用最便宜的波动率环境买最贵的下行翼",
+            "指数端（SPY/QQQ）IV 趴在地板却把下行偏斜和曲率抬到 P90+ 高位",
+            "SPY：保险贵、波动便宜的剪刀差已拉满",
+            # 08-26 / 08-27 原句
+            "宽基（SPY/QQQ）IV 趴在低位但下行偏斜挂在 P90 一线",
+            "SPY：保护被持续抢筹但没人肯为整体波动付钱",
+            "SPY 且口径在打架：RR25 高分位说 put 翼贵",
+            "QQQ 口径打架——RR25 P84 说 put 翼贵",
+            "全场一个基调：波动率被砸到地板，尾部保险却钉在天花板——宽基与科技的 ATM IV 齐落"]:
     hits = assistant.direction_conflicts(bad, packs)
     check(f"命中反例：{bad}", len(hits) >= 1, f"hits={hits}")
 for good in ["SPY：看跌翼部处一年最便宜",
              "SPY 看跌保护相对看涨处于一年最便宜之列，put 仍比 call 贵但溢价一年最薄",
              "NVDA：put 翼极贵（RR P6），担忧挤在个股左翼",
              "QQQ 同款：左偏程度处于一年最轻之列",
-             "今天担忧集中在哪个层级？个股"]:
+             "今天担忧集中在哪个层级？个股",
+             "宽基平静，担忧集中在个股左翼",
+             "NVDA 在买下跌保险",
+             "SPY：看跌翼仍比看涨翼贵，但看跌偏斜处于一年最平之列",
+             # 线上回测的误报（rr25<0 时「put 翼贵」按符号说是对的）
+             "纳指科技在个股层面往看涨翼倾斜，指数本身仍是 put 翼贵",
+             "MU 翼部 RR +0.009 在 P90（call 翼贵，与 QQQ 的 put 翼贵反向）",
+             "SPY：中心极密、两尾都便宜、右翼相对左翼贵",
+             "SPY RR P99 = 看跌保护相对看涨一年最便宜",
+             "指数 RR P99：左偏程度处于一年最轻之列，看跌保护相对看涨一年最便宜"]:
     hits = assistant.direction_conflicts(good, packs)
     check(f"不误报：{good}", hits == [], f"hits={hits}")
 multi = "NVDA · 钉 10-17\n· put 翼极贵，个股左偏一年最重\nSPY · 钉 10-17\n· 结构极度偏 put"
 hits = assistant.direction_conflicts(multi, packs)
 check("多段文本：无标的名的行归到最近点名的标的（只命中 SPY 段）",
       len(hits) == 1 and "SPY" in hits[0] and "极度偏 put" in hits[0], f"hits={hits}")
+fat_tail = {"SPY": {"state": assistant._state([st("rr25", -0.02, 99.0), st("tail_p_down", 0.2, 95.0)])}}
+hits = assistant.direction_conflicts("SPY：下跌保险贵（下尾概率 P95）", fat_tail)
+check("「保险贵」在下尾概率高位时不算反例（说的是尾部概率，不是 rr25）", hits == [], f"hits={hits}")
 benchmark_only = {"NVDA": packs["NVDA"]}
 hits = assistant.direction_conflicts("对照 QQQ：put 翼极贵", benchmark_only)
 check("只在 benchmark 里出现的指数也能查（个股助手答案提到 QQQ）", len(hits) == 1, f"hits={hits}")
