@@ -20,9 +20,11 @@ IDENTITY_NOTE = ("身份未登记：币安仓位没有投机/信念登记。纪�
                  "都列出并各自标注，不替用户假设身份。")
 
 # LLM 接缝配置（framework §4 / T1）。用户有 Anthropic/OpenAI 兼容中转，接入=填这三行 .env。
-ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-fable-5-1")
+ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-opus-5-5")
 # 质量优先：默认开满 reasoning，不计预算（用户定调）。effort 可用 .env 调到 xhigh/max。
 ASSISTANT_EFFORT = os.getenv("ASSISTANT_EFFORT", "high")
+# 主模型被中转限流 / 日额度（TPD）耗尽（429）时改用的模型；留空 = 不降级。2026-10 实测 Opus 线路有日额度。
+ASSISTANT_FALLBACK_MODEL = os.getenv("ASSISTANT_FALLBACK_MODEL", "")
 
 
 class AssistantNotConfigured(RuntimeError):
@@ -168,7 +170,7 @@ def build_outlook_messages(symbols: list[str], packs: dict | None = None) -> tup
     return {"system": SYSTEM_PROMPT, "user": user}, asof
 
 
-def generate(system: str, user: str, *, max_tokens: int = 16000) -> str:
+def generate(system: str, user: str, *, max_tokens: int = 32000) -> str:
     """单次请求（framework §4）：装配好的提示 → LLM → 文本。这是唯一的模型接缝。
 
     走官方 anthropic SDK，base_url 指向用户的兼容中转（.env: ASSISTANT_BASE_URL /
@@ -187,26 +189,54 @@ def generate(system: str, user: str, *, max_tokens: int = 16000) -> str:
             "未安装 anthropic SDK：请 `.venv/bin/pip install anthropic`，"
             "或改写 generate() 走你的 OpenAI 兼容客户端") from e
 
-    client = anthropic.Anthropic(api_key=api_key, base_url=os.getenv("ASSISTANT_BASE_URL") or None)
-    kwargs = dict(model=ASSISTANT_MODEL, max_tokens=max_tokens, system=system,
-                  messages=[{"role": "user", "content": user}])
-    try:
+    # 单次生成就要几分钟：超时 / 5xx 只重试 1 次（SDK 默认 2 次，最坏要等 3×900s）。
+    client = anthropic.Anthropic(api_key=api_key, base_url=os.getenv("ASSISTANT_BASE_URL") or None,
+                                 max_retries=1)
+    # max_tokens 由 thinking + 正文共用：2026-10 实测 Opus 全池展望 16000 吃满（15999/16000），
+    # 故放到 32000。超过 ~21k 时 SDK 会拒绝默认超时的非流式请求，显式给 timeout 即放行；
+    # 读超时放宽到 900s，连接超时保持 SDK 原来的 5s（中转不通时快速失败）。
+    kwargs = dict(max_tokens=max_tokens, system=system,
+                  messages=[{"role": "user", "content": user}],
+                  timeout=anthropic.Timeout(900.0, connect=5.0))
+
+    def call(model):
         try:
-            # 开满深度思考（Opus 系需显式 adaptive 才开；Fable 5 always-on）。
-            resp = client.messages.create(
-                **kwargs, thinking={"type": "adaptive"}, output_config={"effort": ASSISTANT_EFFORT})
+            # 深度思考：adaptive + effort（.env ASSISTANT_EFFORT）；中转/模型不认则下面降级为普通调用。
+            return client.messages.create(model=model, **kwargs, thinking={"type": "adaptive"},
+                                          output_config={"effort": ASSISTANT_EFFORT})
         except anthropic.BadRequestError:
             # 中转/模型不认 thinking·effort → 降级为普通调用。
-            resp = client.messages.create(**kwargs)
+            return client.messages.create(model=model, **kwargs)
+
+    model = ASSISTANT_MODEL
+    try:
+        try:
+            resp = call(model)
+        except anthropic.RateLimitError as e:
+            if not ASSISTANT_FALLBACK_MODEL or ASSISTANT_FALLBACK_MODEL == model:
+                raise
+            print(f"[assistant] {model} 429（{getattr(e, 'message', e)}），改用 {ASSISTANT_FALLBACK_MODEL}",
+                  flush=True)
+            model = ASSISTANT_FALLBACK_MODEL
+            resp = call(model)
     except anthropic.APIError as e:
         # 模型 id 错、鉴权失败、中转故障等统一转 AssistantError（端点 → 502），不漏成 500。
         raise AssistantError(f"模型调用失败：{getattr(e, 'message', str(e))}") from e
+    u = getattr(resp, "usage", None)
+    print(f"[assistant] {model} stop={resp.stop_reason} "
+          f"in={getattr(u, 'input_tokens', '?')} out={getattr(u, 'output_tokens', '?')}/{max_tokens}",
+          flush=True)
     text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
     if not text.strip():
         # 思考型模型把预算耗在 thinking 上、text 为空时不静默返回空串。
         raise AssistantError(
-            f"模型 {ASSISTANT_MODEL} 未产出正文（stop_reason={resp.stop_reason}）"
-            "——多为思考耗尽 max_tokens；请调大 max_tokens 或换非思考型模型")
+            f"模型 {model} 未产出正文（stop_reason={resp.stop_reason}）"
+            "——多为思考耗尽 max_tokens；请调大 max_tokens 或调低 ASSISTANT_EFFORT")
+    if resp.stop_reason == "max_tokens":
+        # 正文写到一半被截断：照发但明示，不当成完整稿。
+        text += "\n\n⚠ 输出触顶 max_tokens 被截断，以上内容不完整。"
+    if model != ASSISTANT_MODEL:
+        text += f"\n\n（{ASSISTANT_MODEL} 被限流 / 额度耗尽，本次由 {model} 生成）"
     return text
 
 
@@ -303,10 +333,15 @@ def generate_checked(msg: dict, packs: dict, **kw) -> str:
     retry = (msg["user"] + "\n\n【方向纠错】上一版以下表述与上下文 reading 的方向相反：\n"
              + "\n".join(f"- {h}" for h in hits)
              + "\n方向一律以 reading 为准，重写全文，其余要求不变。")
-    text = generate(msg["system"], retry, **kw)
-    hits = direction_conflicts(text, packs)
+    try:
+        text = generate(msg["system"], retry, **kw)
+    except AssistantError as e:
+        # 重写失败（超时 / 中转故障）不能连首版一起丢：退回首版，挂首版命中的警告。
+        print(f"[方向自检] 重写失败，退回首版挂警告发出：{e}")
+    else:
+        hits = direction_conflicts(text, packs)
     if hits:
-        print(f"[方向自检] 重写后仍命中 {len(hits)} 处，挂警告发出：", *hits, sep="\n  ")
+        print(f"[方向自检] 发出版仍命中 {len(hits)} 处，挂警告：", *hits, sep="\n  ")
         text += ("\n\n⚠ 方向自检未通过——以下表述与数据方向相反，以面板为准：\n"
                  + "\n".join(f"· {h}" for h in hits))
     return text

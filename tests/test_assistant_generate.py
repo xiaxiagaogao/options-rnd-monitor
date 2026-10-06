@@ -1,7 +1,7 @@
 """研究助手 LLM 接缝（generate）的契约验证：未配置时须显式抛错、不静默。
 
 用法：.venv/bin/python tests/test_assistant_generate.py
-本测试不触网——只验证"未配置"这条自愈契约（用户后续填 .env 接入真实中转）。
+本测试不触网：验证"未配置"自愈契约，并用假客户端验证预算 / 超时 / 截断标记。
 """
 import os
 import sys
@@ -41,6 +41,75 @@ check("未配置密钥时抛 AssistantNotConfigured",
 msg = str(raised) if raised else ""
 check("错误信息含接入指引", any(k in msg for k in ("ASSISTANT_API_KEY", ".env", "配置", "未配置")),
       f"msg={msg!r}")
+
+
+# --- 4. 已配置（假客户端，不触网）：预算 / 超时 / 截断标记 ---
+import types  # noqa: E402
+
+import anthropic  # noqa: E402
+import httpx  # noqa: E402
+
+seen = []
+_429 = anthropic.RateLimitError(
+    "UID rate limit reached for TPD", body=None,
+    response=httpx.Response(429, request=httpx.Request("POST", "http://relay.test/v1/messages")))
+
+
+def _fake_client(stop, limited=None):
+    """假 anthropic.Anthropic：记下每次 create 的参数；model == limited 时抛 429。"""
+    def create(**kw):
+        seen.append(kw)
+        if limited and kw["model"] == limited:
+            raise _429
+        return types.SimpleNamespace(
+            stop_reason=stop, usage=types.SimpleNamespace(input_tokens=1, output_tokens=2),
+            content=[types.SimpleNamespace(type="thinking", thinking="…"),
+                     types.SimpleNamespace(type="text", text="正文")])
+    return lambda **_: types.SimpleNamespace(messages=types.SimpleNamespace(create=create))
+
+
+_orig_cls = anthropic.Anthropic
+os.environ["ASSISTANT_API_KEY"] = "test-key"
+try:
+    anthropic.Anthropic = _fake_client("end_turn")
+    out = assistant.generate("s", "u")
+    kw = seen[-1] if seen else {}
+    check("默认 max_tokens ≥ 32000（thinking+正文共用，16000 实测吃满）", kw.get("max_tokens", 0) >= 32000,
+          f"max_tokens={kw.get('max_tokens')}")
+    t = kw.get("timeout")
+    check("显式传 timeout（>21k 非流式否则被 SDK 拒）：读 ≥900s、连接仍 ≤10s",
+          getattr(t, "read", 0) >= 900 and 0 < (getattr(t, "connect", None) or 999) <= 10, f"timeout={t!r}")
+    check("正常结束 → 原样返回正文", out == "正文", repr(out))
+
+    anthropic.Anthropic = _fake_client("max_tokens")
+    out = assistant.generate("s", "u")
+    check("stop_reason=max_tokens → 正文末尾标注截断", out.startswith("正文") and "截断" in out, repr(out))
+
+    # --- 5. 主模型 429（中转 TPD 耗尽）→ 有 ASSISTANT_FALLBACK_MODEL 则改用之，否则照旧报错 ---
+    anthropic.Anthropic = _fake_client("end_turn", limited=assistant.ASSISTANT_MODEL)
+    _orig_fb = assistant.ASSISTANT_FALLBACK_MODEL
+    try:
+        assistant.ASSISTANT_FALLBACK_MODEL = ""
+        raised = None
+        try:
+            assistant.generate("s", "u")
+        except Exception as e:  # noqa: BLE001
+            raised = e
+        check("未设降级模型：429 照旧转 AssistantError", isinstance(raised, assistant.AssistantError),
+              f"got={type(raised).__name__ if raised else None}")
+
+        assistant.ASSISTANT_FALLBACK_MODEL = "fallback-model"
+        seen.clear()
+        out = assistant.generate("s", "u")
+        check("设了降级模型：429 → 改用降级模型重发一次",
+              [k["model"] for k in seen] == [assistant.ASSISTANT_MODEL, "fallback-model"],
+              f"models={[k['model'] for k in seen]}")
+        check("降级产出末尾注明实际模型", out.startswith("正文") and "本次由 fallback-model 生成" in out, repr(out))
+    finally:
+        assistant.ASSISTANT_FALLBACK_MODEL = _orig_fb
+finally:
+    anthropic.Anthropic = _orig_cls
+    os.environ.pop("ASSISTANT_API_KEY", None)
 
 
 if failures:

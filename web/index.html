@@ -32,7 +32,7 @@
       <div class="brand">
         <span class="brand-name">RND</span>
         <span class="tag" v-if="dataDate">数据 {{ dataDate }} 收盘</span>
-        <span class="tag" v-if="view==='assistant'">Fable 5 · 数据描述非建议</span>
+        <span class="tag" v-if="view==='assistant'">Opus 5.5 · 数据描述非建议</span>
       </div>
       <div class="topbar-right">
         <button class="chip ghost" @click="doLogout">退出</button>
@@ -656,8 +656,8 @@
             {{ outlookBusy ? '生成中…' : (outlook ? '重新生成' : '生成') }}</button>
         </div>
         <div v-if="outlookBusy" class="thinking">
-          <span class="spin"></span> Fable 5 综合全量标的（{{ symbols.join(' / ') }}）…
-          <b>{{ outlookElapsed }}s</b><span class="annot"> · max effort，约 1–3 分钟</span>
+          <span class="spin"></span> Opus 5.5 综合全量标的（{{ symbols.join(' / ') }}）…
+          <b>{{ outlookElapsed }}s</b><span class="annot"> · 深度思考，约 3–5 分钟</span>
         </div>
         <div v-else-if="outlook" class="md" v-html="md(outlook)"></div>
         <div v-else class="annot">对所有自选标的出一版有净判断的市场展望——按板块归拢基调、每标的净读 + 顺逆风 + 情景触发。RN≠真实，不表方向、不下单。</div>
@@ -682,8 +682,8 @@
             <div v-if="m.answer" class="md" v-html="md(m.answer)"></div>
             <div v-else-if="m.error" class="login-err">{{ m.error }}</div>
             <div v-else class="thinking">
-              <span class="spin"></span> Fable 5 深度推理中… <b>{{ asElapsed }}s</b>
-              <span class="annot"> · max effort，约 1–3 分钟，请稍候</span>
+              <span class="spin"></span> Opus 5.5 深度推理中… <b>{{ asElapsed }}s</b>
+              <span class="annot"> · 深度思考，约 1–3 分钟，请稍候</span>
             </div>
             <div v-if="m.answer" class="a-foot">
               <span class="annot">{{ m.symbol }} · 数据日 {{ m.asof }} · 用时 {{ m.secs }}s</span>

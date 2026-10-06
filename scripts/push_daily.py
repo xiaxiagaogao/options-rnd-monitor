@@ -5,7 +5,7 @@
     .venv/bin/python scripts/push_daily.py --alerts     # 只推异动（快，不调 LLM）
     .venv/bin/python scripts/push_daily.py --dry         # 只打印不发送
 
-未配 TELEGRAM_BOT_TOKEN → 整体跳过（不白跑 1–3 分钟的 Fable 摘要）。
+未配 TELEGRAM_BOT_TOKEN → 整体跳过（不白跑一次模型展望）。
 """
 import os
 import sys
@@ -64,7 +64,7 @@ def run(symbols: list[str] | None = None, *, do_digest: bool = True, dry: bool =
     else:
         print("--- 异动 --- 无")
 
-    # 2. 全量市场展望（C++ outlook，Fable max，1–3 分钟）——每日汇报复用此模式
+    # 2. 全量市场展望（C++ outlook；模型与 effort 见 .env 的 ASSISTANT_*）——每日汇报复用此模式
     if do_digest:
         packs = assistant.build_packs(syms)
         msg, asof = assistant.build_outlook_messages(syms, packs=packs)

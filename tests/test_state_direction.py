@@ -236,6 +236,19 @@ try:
     check("重写仍命中 → 不再重试", len(calls) == 2, f"calls={len(calls)}")
     check("重写仍命中 → 末尾挂方向自检警告", out.startswith("SPY：结构极度偏 put")
           and "方向自检未通过" in out and "看跌保护相对看涨处于一年最便宜之列" in out, out)
+
+    def _fail_second(system, user, **kw):
+        calls.append(user)
+        if len(calls) > 1:
+            raise assistant.AssistantError("模型调用失败：timeout")
+        return "SPY：put 翼极贵"
+
+    calls.clear()
+    assistant.generate = _fail_second
+    out = assistant.generate_checked(msg, packs)
+    check("重写失败 → 退回首版、不抛", out.startswith("SPY：put 翼极贵"), out)
+    check("重写失败 → 首版挂方向自检警告", "方向自检未通过" in out
+          and "看跌保护相对看涨处于一年最便宜之列" in out, out)
 finally:
     assistant.generate = _orig_gen
 
