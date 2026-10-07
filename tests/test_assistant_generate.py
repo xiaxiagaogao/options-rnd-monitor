@@ -85,28 +85,18 @@ try:
     out = assistant.generate("s", "u")
     check("stop_reason=max_tokens → 正文末尾标注截断", out.startswith("正文") and "截断" in out, repr(out))
 
-    # --- 5. 主模型 429（中转 TPD 耗尽）→ 有 ASSISTANT_FALLBACK_MODEL 则改用之，否则照旧报错 ---
+    # --- 5. 429（中转余额不足）→ 直接转 AssistantError，不换模型重试（用户定：失败就失败）---
     anthropic.Anthropic = _fake_client("end_turn", limited=assistant.ASSISTANT_MODEL)
-    _orig_fb = assistant.ASSISTANT_FALLBACK_MODEL
+    seen.clear()
+    raised = None
     try:
-        assistant.ASSISTANT_FALLBACK_MODEL = ""
-        raised = None
-        try:
-            assistant.generate("s", "u")
-        except Exception as e:  # noqa: BLE001
-            raised = e
-        check("未设降级模型：429 照旧转 AssistantError", isinstance(raised, assistant.AssistantError),
-              f"got={type(raised).__name__ if raised else None}")
-
-        assistant.ASSISTANT_FALLBACK_MODEL = "fallback-model"
-        seen.clear()
-        out = assistant.generate("s", "u")
-        check("设了降级模型：429 → 改用降级模型重发一次",
-              [k["model"] for k in seen] == [assistant.ASSISTANT_MODEL, "fallback-model"],
-              f"models={[k['model'] for k in seen]}")
-        check("降级产出末尾注明实际模型", out.startswith("正文") and "本次由 fallback-model 生成" in out, repr(out))
-    finally:
-        assistant.ASSISTANT_FALLBACK_MODEL = _orig_fb
+        assistant.generate("s", "u")
+    except Exception as e:  # noqa: BLE001
+        raised = e
+    check("429 → AssistantError", isinstance(raised, assistant.AssistantError),
+          f"got={type(raised).__name__ if raised else None}")
+    check("429 后不换模型重试：只打主模型一次", [k["model"] for k in seen] == [assistant.ASSISTANT_MODEL],
+          f"models={[k['model'] for k in seen]}")
 finally:
     anthropic.Anthropic = _orig_cls
     os.environ.pop("ASSISTANT_API_KEY", None)
