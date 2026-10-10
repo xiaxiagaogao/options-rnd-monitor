@@ -1,7 +1,7 @@
 """研究助手 LLM 接缝（generate）的契约验证：未配置时须显式抛错、不静默。
 
 用法：.venv/bin/python tests/test_assistant_generate.py
-本测试不触网：验证"未配置"自愈契约，并用假客户端验证预算 / 超时 / 截断标记。
+本测试不触网：验证"未配置"自愈契约，并用假客户端验证预算 / 超时 / 截断标记 / 空正文重试。
 """
 import os
 import sys
@@ -97,6 +97,46 @@ try:
           f"got={type(raised).__name__ if raised else None}")
     check("429 后不换模型重试：只打主模型一次", [k["model"] for k in seen] == [assistant.ASSISTANT_MODEL],
           f"models={[k['model'] for k in seen]}")
+
+    # --- 6. 正文为空（10-10 实测：200 + end_turn + out=8、无 text 块）→ 同模型重试一次（用户定）---
+    def _fake_seq(texts):
+        """假客户端：第 i 次 create 返回 texts[i]；空串 = 只有 thinking 块、无正文。"""
+        it = iter(texts)
+
+        def create(**kw):
+            seen.append(kw)
+            t = next(it)
+            blocks = [types.SimpleNamespace(type="thinking", thinking="…")]
+            if t:
+                blocks.append(types.SimpleNamespace(type="text", text=t))
+            return types.SimpleNamespace(stop_reason="end_turn",
+                                         usage=types.SimpleNamespace(input_tokens=1, output_tokens=8),
+                                         content=blocks)
+        return lambda **_: types.SimpleNamespace(messages=types.SimpleNamespace(create=create))
+
+    anthropic.Anthropic = _fake_seq(["", "重试正文"])
+    seen.clear()
+    out = assistant.generate("s", "u")
+    check("首次正文为空 → 同模型重试一次并返回重试正文",
+          out == "重试正文" and [k["model"] for k in seen] == [assistant.ASSISTANT_MODEL] * 2,
+          f"out={out!r} models={[k['model'] for k in seen]}")
+
+    anthropic.Anthropic = _fake_seq(["", "", "不该走到第三次"])
+    seen.clear()
+    raised = None
+    try:
+        assistant.generate("s", "u")
+    except Exception as e:  # noqa: BLE001
+        raised = e
+    check("两次都为空 → AssistantError，且总共只打 2 次", isinstance(raised, assistant.AssistantError)
+          and len(seen) == 2, f"got={type(raised).__name__ if raised else None} calls={len(seen)}")
+    check("end_turn 空正文的报错不再误导成「思考耗尽 max_tokens」",
+          raised is not None and "思考耗尽" not in str(raised), f"msg={str(raised)!r}")
+
+    anthropic.Anthropic = _fake_seq(["首次就有正文"])
+    seen.clear()
+    out = assistant.generate("s", "u")
+    check("首次有正文 → 不重试", out == "首次就有正文" and len(seen) == 1, f"calls={len(seen)}")
 finally:
     anthropic.Anthropic = _orig_cls
     os.environ.pop("ASSISTANT_API_KEY", None)

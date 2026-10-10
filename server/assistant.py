@@ -196,28 +196,37 @@ def generate(system: str, user: str, *, max_tokens: int = 32000) -> str:
     kwargs = dict(model=ASSISTANT_MODEL, max_tokens=max_tokens, system=system,
                   messages=[{"role": "user", "content": user}],
                   timeout=anthropic.Timeout(900.0, connect=5.0))
-    try:
+    # 正文为空 → 同模型重试一次（用户定）：2026-10-10 实测 200 + end_turn + out=8、无 text 块、耗时 4 分钟，
+    # 疑似中转与上游之间断流；09-01 / 09-22 的 Fable 也出现过。只重试正文为空，不重试 API 错误、不换模型。
+    for attempt in (1, 2):
         try:
-            # 深度思考：adaptive + effort（.env ASSISTANT_EFFORT）。
-            resp = client.messages.create(
-                **kwargs, thinking={"type": "adaptive"}, output_config={"effort": ASSISTANT_EFFORT})
-        except anthropic.BadRequestError:
-            # 中转/模型不认 thinking·effort → 降级为普通调用。
-            resp = client.messages.create(**kwargs)
-    except anthropic.APIError as e:
-        # 模型 id 错、鉴权失败、中转余额不足（429）等统一转 AssistantError（端点 → 502），不漏成 500。
-        # 不换模型重试（用户定）：失败就失败，推送跳过展望。
-        raise AssistantError(f"模型调用失败：{getattr(e, 'message', str(e))}") from e
-    u = getattr(resp, "usage", None)
-    print(f"[assistant] {ASSISTANT_MODEL} stop={resp.stop_reason} "
-          f"in={getattr(u, 'input_tokens', '?')} out={getattr(u, 'output_tokens', '?')}/{max_tokens}",
-          flush=True)
-    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-    if not text.strip():
-        # 思考型模型把预算耗在 thinking 上、text 为空时不静默返回空串。
+            try:
+                # 深度思考：adaptive + effort（.env ASSISTANT_EFFORT）。
+                resp = client.messages.create(
+                    **kwargs, thinking={"type": "adaptive"}, output_config={"effort": ASSISTANT_EFFORT})
+            except anthropic.BadRequestError:
+                # 中转/模型不认 thinking·effort → 降级为普通调用。
+                resp = client.messages.create(**kwargs)
+        except anthropic.APIError as e:
+            # 模型 id 错、鉴权失败、中转余额不足（429）等统一转 AssistantError（端点 → 502），不漏成 500。
+            # 不换模型重试（用户定）：失败就失败，推送跳过展望。
+            raise AssistantError(f"模型调用失败：{getattr(e, 'message', str(e))}") from e
+        u = getattr(resp, "usage", None)
+        print(f"[assistant] {ASSISTANT_MODEL} stop={resp.stop_reason} "
+              f"in={getattr(u, 'input_tokens', '?')} out={getattr(u, 'output_tokens', '?')}/{max_tokens}",
+              flush=True)
+        text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+        if text.strip():
+            break
+        blocks = [getattr(b, "type", "?") for b in resp.content]
+        if attempt == 1:
+            print(f"[assistant] 正文为空（blocks={blocks}），同模型重试一次", flush=True)
+    else:
+        # 不静默返回空串。stop=max_tokens 才是思考耗尽预算；end_turn 空正文多为中转 / 上游断流。
+        hint = ("思考耗尽 max_tokens，请调大 max_tokens 或调低 ASSISTANT_EFFORT"
+                if resp.stop_reason == "max_tokens" else "疑似中转 / 上游断流，可到中转后台查这两次请求")
         raise AssistantError(
-            f"模型 {ASSISTANT_MODEL} 未产出正文（stop_reason={resp.stop_reason}）"
-            "——多为思考耗尽 max_tokens；请调大 max_tokens 或调低 ASSISTANT_EFFORT")
+            f"模型 {ASSISTANT_MODEL} 两次均未产出正文（stop_reason={resp.stop_reason}，blocks={blocks}）——{hint}")
     if resp.stop_reason == "max_tokens":
         # 正文写到一半被截断：照发但明示，不当成完整稿。
         text += "\n\n⚠ 输出触顶 max_tokens 被截断，以上内容不完整。"
