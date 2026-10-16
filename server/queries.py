@@ -67,6 +67,12 @@ def latest_date(c, symbol: str) -> str | None:
     return r[0] if r else None
 
 
+def global_latest_date(c) -> str | None:
+    """全池最新数据日（任一标的的最新钉住指标日）。单标的 RND 停更时它比 latest_date 新。"""
+    r = c.execute("SELECT MAX(date) FROM rnd_indicators WHERE pinned=1").fetchone()
+    return r[0] if r else None
+
+
 def _row(c, q, args=()):
     cur = c.execute(q, args)
     r = cur.fetchone()

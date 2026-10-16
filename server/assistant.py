@@ -48,6 +48,10 @@ SYSTEM_PROMPT = """\
   （definition）预写的方向描述。贵/便宜、左偏轻/重、倒挂与否一律以它为准，**不得自行从分位数推断方向**
   ——P 高只表示原始值大，不等于「X 贵」。例：rr25 = IV(25Δ 看涨) − IV(25Δ 看跌)，
   指数 rr25 分位高 = 看跌保护相对看涨便宜，不是 put 贵。
+- **失效以包内 invalidated 为准**：position.invalidated / stop_lines.*.invalidated 是代码拿
+  current_close_date 那天的收盘对冻结线判的。close_basis 非 null = 收盘日与 RND 读数日不同（多为该标的
+  RND 停更）：分布、偏移按 meta.asof 说，失效按 close_basis 写明用哪天收盘，两个日期分开写；
+  不得拿旧读数日的收盘说「未失效」。
 
 ## 九条纪律
 1. 冻结线写入后不可变；偏移量 (现Q−冻结Q)/σ1 是加减仓信息，不是重画失效线的借口。
@@ -155,6 +159,8 @@ def build_outlook_messages(symbols: list[str], packs: dict | None = None) -> tup
         "  · 身份未登记（identity 为 null）的持仓：投机线 Q25 与信念线 Q05 两条都挂、"
         "注明「身份未登记」，不替用户选。\n"
         "  · 失效线按包内 frozen_basis 写明口径（本周期冻结 + 冻结日）。\n"
+        "  · 是否失效照 invalidated 写；close_basis 非 null（RND 停更）时照它写明失效判定用的是"
+        "哪天收盘，与分布日期分开说，已失效的线直说已失效。\n"
         "  · position.open 为 null = 持仓状态未知：照实说，不写成无持仓。\n\n"
         "【红线——展望不是指令】\n"
         "- 允许：决断的环境净判断、点名不对称、情景触发、**对已有论点/持仓的顺逆风判定**"
@@ -364,6 +370,8 @@ def build_context(symbol: str, asof: str | None = None, *, holdings: dict | None
     """holdings：load_holdings() 的结果；None → 本函数自读。"""
     symbol = symbol.upper()
     c = q.conn()
+    # 判失效的收盘封顶日：显式 asof（历史回放不读未来）或全池最新数据日。
+    close_cap = asof or q.global_latest_date(c)
     asof = asof or q.latest_date(c, symbol)
     ind = q._row(
         c, "SELECT * FROM rnd_indicators WHERE symbol=? AND date=? AND pinned=1",
@@ -372,16 +380,13 @@ def build_context(symbol: str, asof: str | None = None, *, holdings: dict | None
     bench = q.benchmark_of(symbol)
     bench_states = q.state_at(c, bench, asof) if asof else []
     positions = q.open_positions(c, symbol)
-    close_row = q._row(
-        c, "SELECT underlying_close FROM raw_chain WHERE symbol=? AND date=? LIMIT 1",
-        (symbol, asof)) if asof else None
-    current_close = close_row["underlying_close"] if close_row else None
+    close = _close(c, symbol, asof, close_cap)
     if positions:
-        position = _position(ind, positions, current_close)
+        position = _position(ind, positions, close)
     else:
         position = _binance_position(c, symbol, asof, ind,
                                      holdings if holdings is not None else load_holdings(),
-                                     current_close)
+                                     close)
     c.close()
 
     meta = {
@@ -551,11 +556,31 @@ def _benchmark(bench: str, bench_states: list[dict]) -> dict:
     }
 
 
-def _position(ind: dict | None, positions: list[dict], current_close) -> dict:
+def _close(c, symbol: str, asof: str | None, cap: str | None) -> dict:
+    """判失效用的收盘：该标的 raw_chain 里 [asof, cap] 内的最新收盘，不停在 RND 读数日 asof。
+
+    2026-10-16 RKLB：RND 10-14 起算失败、停在 10-13，按 10-13 收盘 64.22 判失效，
+    漏掉 10-14（59.18）起已破投机线 Q25 59.74。分布、偏移仍按 asof；只有收盘比较用更新的价。
+    收盘日 ≠ asof 时给 close_basis 白话，让模型把两个日期分开写。
+    下界 asof：有 RND 的那天必有链；raw_chain 主键以 date 打头，不设下界时无链标的会倒扫全表。
+    """
+    row = q._row(
+        c, "SELECT date, underlying_close FROM raw_chain WHERE symbol=? AND date BETWEEN ? AND ?"
+           " ORDER BY date DESC LIMIT 1", (symbol, asof, cap)) if asof and cap else None
+    close, d = (row["underlying_close"], row["date"]) if row else (None, None)
+    basis = None
+    if d and d != asof:
+        basis = (f"该标的 RND 读数停在 {asof}（分布、偏移按该日）；失效判定按 {d} 收盘 {close}。"
+                 "两个日期分开写，是否失效以包内 invalidated 为准")
+    return {"current_close": close, "current_close_date": d, "close_basis": basis}
+
+
+def _position(ind: dict | None, positions: list[dict], close: dict) -> dict:
     """开仓监控（framework §1.1-1..5 铁律；§2.1 罗盘读数）。
 
     - 冻结线不可变；偏移量 = (现 Q − 冻结 Q)/冻结 σ1，是加减仓信息、不重画失效线。
-    - 失效判定收盘确认制：多头 close < 冻结止损分位 → invalidated（空头反向）。
+    - 失效判定收盘确认制：多头 close < 冻结止损分位 → invalidated（空头反向）；
+      close 取 _close（current_close_date 那天），不是 RND 读数日。
     """
     if not positions:
         return {"open": False}
@@ -566,6 +591,7 @@ def _position(ind: dict | None, positions: list[dict], current_close) -> dict:
         offset = {k: (ind[k] - p[f"frozen_{k}"]) / sig for k in _QUANTS}
     stop_q = p.get("stop_q")
     stop_level = p.get(f"frozen_{stop_q}") if stop_q else None
+    current_close = close["current_close"]
     invalidated = None
     if stop_level is not None and current_close is not None:
         long = (p.get("direction", "long") == "long")
@@ -586,19 +612,20 @@ def _position(ind: dict | None, positions: list[dict], current_close) -> dict:
             "frozen_q05", "frozen_q25", "frozen_q50", "frozen_q75", "frozen_q95")},
         "offset": offset,
         "stop_level": stop_level,
-        "current_close": current_close,
+        **close,
         "invalidated": invalidated,
     }
 
 
 def _binance_position(c, symbol: str, asof: str | None, ind: dict | None,
-                      holdings: dict, current_close) -> dict:
+                      holdings: dict, close: dict) -> dict:
     """币安实际持仓（journal 无开仓时；2026-08-06 口径决策：以 fund 同步为准）。
 
     - 身份未登记 → identity/stop_q 为 None，stop_lines 同时给投机 Q25 与信念 Q05。
     - 冻结 = 本周期冻结（queries.cycle_freeze_date），与止盈止损页曲线一同一套数；
       标的页持仓卡 / 今日页的灯按入场日冻结，数字会不同。
-    - 偏移与失效判定同 journal 轨：(现Q − 冻结Q)/冻结σ1；收盘确认，多头 close < 线 → 失效（空头反向）。
+    - 偏移与失效判定同 journal 轨：(现Q − 冻结Q)/冻结σ1；收盘确认，多头 close < 线 → 失效（空头反向）；
+      close 同样取 _close（current_close_date 那天）。
     """
     if holdings["entries"] is None:
         return {"open": None, "source": "binance",
@@ -621,8 +648,9 @@ def _binance_position(c, symbol: str, asof: str | None, ind: dict | None,
         "entry_price": e["entry_price"],
         "qty": e["qty"],
         "open_date": e["open_date"],
-        "current_close": current_close,
+        **close,
     }
+    current_close = close["current_close"]
     fd = cycle_start = None
     if ind is not None:
         fd, cycle_start = q.cycle_freeze_date(c, symbol, ind["expiry"], e.get("rnd_date"))
