@@ -134,15 +134,18 @@ createApp({
       };
       return { q05: f("q05"), q25: f("q25") };
     },
-    // 事实陈述：今日收盘是否已跌破入场日 Q05（多头口径；净仓为负则反向）。
+    // 事实陈述：最新收盘是否已跌破入场日 Q05（多头口径；净仓为负则反向）。
     // 注意与 journal 的语义差别——这里没有"你承诺过的失效线"，只是描述位置。
+    // 收盘取 detail.close（服务端 latest_close）：RND 停更时它比数据日新，不取扇形图最后一天的收盘。
     beBreached() {
-      const be = this.binanceEntry;
-      if (!be || !be.frozen || !this.fanData) return false;
-      const dates = this.fanData.dates;
-      const close = this.fanData.close[dates[dates.length - 1]];
-      if (close == null) return false;
+      const be = this.binanceEntry, close = this.detail && this.detail.close;
+      if (!be || !be.frozen || close == null) return false;
       return be.qty >= 0 ? close < be.frozen.q05 : close > be.frozen.q05;
+    },
+    // 判灯收盘日 ≠ 数据日（该标的 RND 停更）时，灯旁注明用的是哪天收盘；相同不注（页头已有数据日）。
+    lampCloseNote() {
+      const d = this.detail;
+      return d && d.close_date && d.close_date !== d.date ? `${d.close_date.slice(5)} 收盘` : "";
     },
     frozenStop() {
       const p = this.myPosition;
@@ -156,12 +159,9 @@ createApp({
       return (off >= 0 ? "+" : "") + off.toFixed(2) + "σ";
     },
     stopBreached() {
-      // 收盘确认制：多头收盘 < 冻结线（空头相反）
-      const p = this.myPosition;
-      if (!p || !this.fanData) return false;
-      const dates = this.fanData.dates;
-      const close = this.fanData.close[dates[dates.length - 1]];
-      if (close == null) return false;
+      // 收盘确认制：多头收盘 < 冻结线（空头相反）；收盘同 beBreached 取 detail.close
+      const p = this.myPosition, close = this.detail && this.detail.close;
+      if (!p || close == null) return false;
       return p.direction === "long" ? close < this.frozenStop : close > this.frozenStop;
     },
     termSlopeText() {
@@ -201,6 +201,10 @@ createApp({
   },
   methods: {
     fmt(v, n = 2) { return v == null ? "—" : Number(v).toFixed(n); },
+    // 今日页持仓灯的说明：写明判的是哪天收盘（RND 停更的标的，收盘日晚于其数据日）。
+    holdLampText(h) {
+      return `${h.close_date.slice(5)} 收盘${h.breached ? "已" : "未"}跌破入场日 Q05`;
+    },
     // 价位：四位数以上一位小数，否则两位
     fmtPx(v) { return v == null ? "—" : Number(v).toFixed(Math.abs(v) >= 1000 ? 1 : 2); },
     fmtQty(q) { return q == null ? "—" : String(+Math.abs(q).toFixed(6)); },

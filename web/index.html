@@ -229,8 +229,8 @@
                      style="cursor:pointer" @click="goSymbol(h.symbol)">
                   <span style="display:inline-flex;align-items:center;gap:6px">
                     <span v-if="h.breached !== null" class="lamp"
-                          :class="h.breached ? 'bad':'ok'"
-                          :title="h.breached ? '今收已跌破入场日 Q05' : '今收未跌破入场日 Q05'"></span>
+                          :class="h.breached ? 'bad':'ok'" role="img"
+                          :title="holdLampText(h)" :aria-label="holdLampText(h)"></span>
                     <span style="font-weight:600">{{ h.symbol }}</span>
                   </span>
                   <span class="qv">{{ h.open_date.slice(5) }} @ {{ fmt(h.entry_price,1) }}</span>
@@ -240,7 +240,7 @@
                 当前池内无币安持仓。池由 fund.db 每日同步驱动，建仓后次个 EOD 自动纳入。
               </div>
               <div class="annot" style="margin-top:12px;border-top:1px dashed #E4E1D9;padding-top:8px">
-                入场日 @ 加权均价 · 灯示今收是否跌破入场日 Q05<br>
+                入场日 @ 加权均价 · 灯示最新收盘是否跌破入场日 Q05<br>
                 持仓 {{ holdings.length }} 只 · RND 池 {{ symbols.length }} 只（基准 + 持仓驱动）<span
                   v-if="holdingsOutOfPool.length">· 池外 {{ holdingsOutOfPool.length }} 只不进算图（{{ holdingsOutOfPool.join(' ') }}）</span>
               </div>
@@ -335,11 +335,13 @@
                 <span v-if="myPosition" class="gate-mini">
                   <span class="lamp" :class="stopBreached ? 'bad':'ok'"></span>
                   <span :style="{color: stopBreached ? '#A33B2E':'#3E7A52', fontWeight:600, fontSize:'12px'}">
-                    {{ stopBreached ? '收盘确认失效！' : '未触发' }}</span></span>
+                    {{ stopBreached ? '收盘确认失效！' : '未触发' }}</span>
+                  <span v-if="lampCloseNote" class="annot">· {{ lampCloseNote }}</span></span>
                 <span v-else-if="binanceEntry && binanceEntry.frozen" class="gate-mini">
                   <span class="lamp" :class="beBreached ? 'bad':'ok'"></span>
                   <span :style="{color: beBreached ? '#A33B2E':'#3E7A52', fontWeight:600, fontSize:'12px'}">
-                    {{ beBreached ? '已跌破入场日 Q05' : '未跌破 Q05' }}</span></span>
+                    {{ beBreached ? '已跌破入场日 Q05' : '未跌破 Q05' }}</span>
+                  <span v-if="lampCloseNote" class="annot">· {{ lampCloseNote }}</span></span>
               </div>
               <template v-if="myPosition">
                 <div class="muted" style="font-size:12px">

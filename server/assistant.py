@@ -562,12 +562,8 @@ def _close(c, symbol: str, asof: str | None, cap: str | None) -> dict:
     2026-10-16 RKLB：RND 10-14 起算失败、停在 10-13，按 10-13 收盘 64.22 判失效，
     漏掉 10-14（59.18）起已破投机线 Q25 59.74。分布、偏移仍按 asof；只有收盘比较用更新的价。
     收盘日 ≠ asof 时给 close_basis 白话，让模型把两个日期分开写。
-    下界 asof：有 RND 的那天必有链；raw_chain 主键以 date 打头，不设下界时无链标的会倒扫全表。
     """
-    row = q._row(
-        c, "SELECT date, underlying_close FROM raw_chain WHERE symbol=? AND date BETWEEN ? AND ?"
-           " ORDER BY date DESC LIMIT 1", (symbol, asof, cap)) if asof and cap else None
-    close, d = (row["underlying_close"], row["date"]) if row else (None, None)
+    close, d = q.latest_close(c, symbol, asof, cap)
     basis = None
     if d and d != asof:
         basis = (f"该标的 RND 读数停在 {asof}（分布、偏移按该日）；失效判定按 {d} 收盘 {close}。"
