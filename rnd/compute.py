@@ -74,7 +74,7 @@ def compute_day(chain: pd.DataFrame, underlying_close: float, sofr: float,
     gate_detail = {
         "no_arb": checks["all_pass"],
         "rr_skew_agree": rr_skew_gate(rr25, mom["log_skew"]),
-        "n_strikes_ok": len(otm) >= 25,
+        "n_strikes_ok": len(otm) >= PIPELINE["min_otm_strikes"],
         "fit_rmse_ok": smile.rmse < 0.01,
     }
     gate_pass = all(gate_detail.values())
