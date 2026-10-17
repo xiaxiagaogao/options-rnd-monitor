@@ -66,6 +66,17 @@ for i, d in enumerate(DATES):
         add_day(sym, i, EXP_A, pinned=int(not cyc_b))
         add_day(sym, i, EXP_B, pinned=int(cyc_b), roll=int(i == 3))
         db.insert_raw_chain(c0, [(d, sym, EXP_B, 100.0, "C", 1, 1.1, 0, None, "", CLOSE[i], 0.04)])
+# RND 陈旧标的（2026-10-16 RKLB：指标停在 10-13，收盘 10-14 起已破投机线，展望仍写「均未失效」）：
+# 指标只到 08-06（D-2），raw_chain 照常到最新数据日 08-10；另有一行晚于全局数据日的 08-11
+# （拉完链、尚未算完的中间态），收盘 50 会把两条线都击穿——不得被读到。
+STALE_LAST = 3
+for sym in ("STL", "STJ"):
+    for i, d in enumerate(DATES):
+        if i <= STALE_LAST:
+            add_day(sym, i, EXP_A, pinned=int(i < 3))
+            add_day(sym, i, EXP_B, pinned=int(i >= 3), roll=int(i == 3))
+        db.insert_raw_chain(c0, [(d, sym, EXP_B, 100.0, "C", 1, 1.1, 0, None, "", CLOSE[i], 0.04)])
+    db.insert_raw_chain(c0, [("2026-08-11", sym, EXP_B, 100.0, "C", 1, 1.1, 0, None, "", 50.0, 0.04)])
 c0.close()
 q.conn = lambda: db.get_conn(tmp)
 
@@ -97,6 +108,7 @@ FUND = make_fund_db([
     ("TSTUSDT", "LONG", "BUY", 2.0, 100.0, "2026-08-04"),
     ("NEWUSDT", "LONG", "BUY", 1.0, 103.0, "2026-08-07"),
     ("LATUSDT", "LONG", "BUY", 1.0, 98.0, "2026-08-11"),
+    ("STLUSDT", "LONG", "BUY", 1.0, 100.0, "2026-08-04"),
 ])
 holdings_sync.FUND_DB_PATH = FUND
 
@@ -206,6 +218,59 @@ def test_close_breach_threshold():
     check("信念线 invalidated == False", lines["conviction"]["invalidated"] is False)
 
 
+def test_stale_rnd_uses_fresh_close():
+    print("\n[RND 陈旧] 指标停在 D-2、raw_chain 有 D 日收盘 → 失效按 D 日收盘判，分布仍按 D-2")
+    fr = ind_on("STL", DATES[STALE_LAST])
+    check("前提：D 日收盘在冻结 Q25 下、Q05 上，D-2 收盘在 Q25 上",
+          fr["q05"] < CLOSE[-1] < fr["q25"] < CLOSE[STALE_LAST])
+    ctx = assistant.build_context("STL")
+    p = ctx["position"]
+    check("分布日期仍是该标的 RND 最新日 08-06", ctx["meta"]["asof"] == DATES[STALE_LAST],
+          f"got={ctx['meta']['asof']}")
+    check("收盘取 D 日 08-10（不读晚于全局数据日的 08-11）",
+          p.get("current_close") == CLOSE[-1] and p.get("current_close_date") == DATES[-1],
+          f"got={p.get('current_close')} @ {p.get('current_close_date')}")
+    lines = p.get("stop_lines") or {}
+    check("投机线 invalidated == True", (lines.get("speculative") or {}).get("invalidated") is True,
+          f"got={lines.get('speculative')}")
+    check("信念线 invalidated == False", (lines.get("conviction") or {}).get("invalidated") is False,
+          f"got={lines.get('conviction')}")
+    check("偏移仍按 08-06 读数（冻结日 = 读数日 → 0）",
+          abs((p.get("offset") or {}).get("q50", 1e9)) < 1e-9, f"got={p.get('offset')}")
+    basis = p.get("close_basis") or ""
+    check("close_basis 分开写分布日与收盘日", DATES[STALE_LAST] in basis and DATES[-1] in basis,
+          f"got={basis!r}")
+
+    print("\n[RND 不陈旧] 收盘日 = 读数日 → close_basis 为 null")
+    pt = assistant.build_context("TST")["position"]
+    check("current_close_date = 08-10、close_basis is None",
+          pt.get("current_close_date") == DATES[-1] and pt.get("close_basis", "missing") is None,
+          f"got={pt.get('current_close_date')} / {pt.get('close_basis', 'missing')!r}")
+
+    print("\n[历史 asof] 回放 08-06 → 只用 08-06 收盘，不读未来")
+    ph = assistant.build_context("STL", asof=DATES[STALE_LAST])["position"]
+    check("current_close = 08-06 收盘",
+          ph.get("current_close") == CLOSE[STALE_LAST] and ph.get("current_close_date") == DATES[STALE_LAST],
+          f"got={ph.get('current_close')} @ {ph.get('current_close_date')}")
+    check("当时投机线未失效", ph["stop_lines"]["speculative"]["invalidated"] is False)
+    check("close_basis is None", ph.get("close_basis") is None, f"got={ph.get('close_basis')!r}")
+
+    print("\n[journal 轨] RND 陈旧时同样按 D 日收盘判")
+    r = q.journal_open({"symbol": "STJ", "identity": "speculative", "entry_price": 100.0})
+    check("前提：journal 冻结在 08-06", r.get("snapshot_date") == DATES[STALE_LAST], f"got={r}")
+    pj = assistant.build_context("STJ")["position"]
+    check("source == journal、止损线 = 冻结 Q25",
+          pj.get("source") == "journal" and pj.get("stop_level") == ind_on("STJ", DATES[STALE_LAST])["q25"])
+    check("收盘取 D 日 08-10", pj.get("current_close_date") == DATES[-1], f"got={pj.get('current_close_date')}")
+    check("invalidated == True", pj.get("invalidated") is True, f"got={pj.get('invalidated')}")
+    check("close_basis 带两个日期", DATES[STALE_LAST] in (pj.get("close_basis") or "")
+          and DATES[-1] in (pj.get("close_basis") or ""), f"got={pj.get('close_basis')!r}")
+
+    print("\n[展望] 提示交代陈旧标的的写法")
+    msg, _ = assistant.build_outlook_messages(["STL"])
+    check("提示点名 close_basis", "close_basis" in msg["user"] and "close_basis" in msg["system"])
+
+
 def test_outlook_context_has_positions():
     print("\n[展望] outlook 的上下文里有持仓，不再是「全组无持仓」")
     calls = []
@@ -270,6 +335,7 @@ if __name__ == "__main__":
     test_cycle_freeze()
     test_matches_exit_page()
     test_close_breach_threshold()
+    test_stale_rnd_uses_fresh_close()
     test_outlook_context_has_positions()
     test_fund_db_unavailable()
     test_asof_before_entry()

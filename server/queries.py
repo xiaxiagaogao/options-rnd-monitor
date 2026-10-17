@@ -67,6 +67,26 @@ def latest_date(c, symbol: str) -> str | None:
     return r[0] if r else None
 
 
+def global_latest_date(c) -> str | None:
+    """全池最新数据日（任一标的的最新钉住指标日）。单标的 RND 停更时它比 latest_date 新。"""
+    r = c.execute("SELECT MAX(date) FROM rnd_indicators WHERE pinned=1").fetchone()
+    return r[0] if r else None
+
+
+def latest_close(c, symbol: str, asof: str | None, cap: str | None) -> tuple[float | None, str | None]:
+    """判线用的收盘 → (close, 收盘日)：raw_chain 在 [asof, cap] 内的最新收盘，不停在 RND 读数日。
+
+    asof = 该标的 RND 读数日；cap = 全池最新数据日（历史回放传 asof 本身，不读未来）。
+    2026-10-16 RKLB：RND 停在 10-13，按 10-13 收盘判，漏掉 10-14 起的跌破。
+    下界 asof：有 RND 的那天必有链；raw_chain 主键以 date 打头，不设下界时无链标的会倒扫全表。
+    """
+    if not (asof and cap):
+        return None, None
+    r = c.execute("SELECT underlying_close, date FROM raw_chain WHERE symbol=? AND date BETWEEN ? AND ?"
+                  " ORDER BY date DESC LIMIT 1", (symbol, asof, cap)).fetchone()
+    return (r[0], r[1]) if r else (None, None)
+
+
 def _row(c, q, args=()):
     cur = c.execute(q, args)
     r = cur.fetchone()
@@ -128,28 +148,26 @@ def overview() -> dict:
             "extremes": extremes, "positions": len(pos),
         })
     # 币安实际持仓摘要（今日页右栏）。口径同标的页那张卡：入场日取当前持仓周期起点、
-    # 价取 quote 加权均价；breached = 今收是否已越过入场日 Q05（多头看跌破、空头相反），
-    # 入场日无钉住行则为 None（不画灯，不臆造状态）。
+    # 价取 quote 加权均价；breached = 最新收盘（latest_close，RND 停更时比读数日新）
+    # 是否已越过入场日 Q05（多头看跌破、空头相反），入场日无钉住行则为 None（不画灯，不臆造状态）。
     from rnd import holdings_sync
     entries = holdings_sync.entry_dates(c)
+    cap = global_latest_date(c)
     holdings = []
     for sym in syms:
         e = entries.get(sym)
         if not e:
             continue
         breached = None
-        d = dates.get(sym)
-        if e.get("rnd_date") and d:
+        close, close_date = latest_close(c, sym, dates.get(sym), cap)
+        if e.get("rnd_date") and close is not None:
             fr = _row(c, "SELECT q05 FROM rnd_indicators WHERE symbol=? AND date=? AND pinned=1",
                       (sym, e["rnd_date"]))
-            cl = _row(c, "SELECT underlying_close FROM raw_chain WHERE symbol=? AND date=? LIMIT 1",
-                      (sym, d))
-            if fr and cl and cl["underlying_close"] is not None:
-                close = cl["underlying_close"]
+            if fr:
                 breached = close < fr["q05"] if e["qty"] >= 0 else close > fr["q05"]
         holdings.append({"symbol": sym, "open_date": e["open_date"],
                          "entry_price": e["entry_price"], "qty": e["qty"],
-                         "breached": breached})
+                         "close": close, "close_date": close_date, "breached": breached})
     out_of_pool = sorted(t for t in entries if t not in syms)
     c.close()
     return {"symbols": out, "holdings": holdings, "holdings_out_of_pool": out_of_pool}
@@ -192,12 +210,14 @@ def symbol_detail(symbol: str) -> dict:
             c, "SELECT date, q05, q25, q50, q75, q95, sigma1_abs FROM rnd_indicators"
                " WHERE symbol=? AND date=? AND pinned=1",
             (symbol, binance_entry["rnd_date"]))
+    # 两盏持仓灯（journal 冻结线 / 币安入场日 Q05）的判定收盘；RND 停更时 close_date 晚于 date。
+    close, close_date = latest_close(c, symbol, d, global_latest_date(c))
     c.close()
     return {
         "symbol": symbol, "date": d, "benchmark": bench,
         "indicators": ind, "gate_detail": gate_detail, "modes": modes,
         "expiries": expiries, "states": states, "positions": pos,
-        "binance_entry": binance_entry,
+        "binance_entry": binance_entry, "close": close, "close_date": close_date,
     }
 
 
