@@ -10,7 +10,7 @@ import os
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np                              # noqa: E402
 from scipy.stats import norm                    # noqa: E402
 
-from rnd import db, holdings_sync               # noqa: E402
+from rnd import db, holdings_sync, identity as ident     # noqa: E402
 from server import assistant, queries as q      # noqa: E402
 
 _failed = []
@@ -62,7 +62,7 @@ def add_day(sym, i, expiry, pinned, roll=0):
 
 for i, d in enumerate(DATES):
     cyc_b = i >= 3
-    for sym in ("TST", "NEW", "OTH", "LAT"):
+    for sym in ("TST", "NEW", "OTH", "LAT", "SHT"):
         add_day(sym, i, EXP_A, pinned=int(not cyc_b))
         add_day(sym, i, EXP_B, pinned=int(cyc_b), roll=int(i == 3))
         db.insert_raw_chain(c0, [(d, sym, EXP_B, 100.0, "C", 1, 1.1, 0, None, "", CLOSE[i], 0.04)])
@@ -109,6 +109,7 @@ FUND = make_fund_db([
     ("NEWUSDT", "LONG", "BUY", 1.0, 103.0, "2026-08-07"),
     ("LATUSDT", "LONG", "BUY", 1.0, 98.0, "2026-08-11"),
     ("STLUSDT", "LONG", "BUY", 1.0, 100.0, "2026-08-04"),
+    ("SHTUSDT", "SHORT", "SELL", 1.0, 100.0, "2026-08-04"),
 ])
 holdings_sync.FUND_DB_PATH = FUND
 
@@ -329,6 +330,49 @@ def test_journal_still_wins():
     check("stop_q == q05", p.get("stop_q") == "q05")
 
 
+SGT = timezone(timedelta(hours=8))
+
+
+def test_identity_short_unregistered():
+    print("\n[身份] 空头未登记 → 两条线用镜像分位 Q75 / Q95")
+    p = assistant.build_context("SHT")["position"]
+    lines = p.get("stop_lines") or {}
+    check("空头方向", p.get("direction") == "short", f"got={p.get('direction')}")
+    check("投机 Q75 + 信念 Q95",
+          (lines.get("speculative") or {}).get("quantile") == "q75"
+          and (lines.get("conviction") or {}).get("quantile") == "q95", f"got={lines}")
+
+
+def test_identity_registered():
+    print("\n[身份] 登记后只认那一条线；改动写进 note；失效按身份线判")
+    c = q.conn()
+    ident.set_identity(c, "TST", "conviction", now=datetime(2026, 10, 19, 9, 30, tzinfo=SGT))
+    c.close()
+    p = assistant.build_context("TST")["position"]
+    lines = p.get("stop_lines") or {}
+    check("identity == conviction / stop_q == q05",
+          p.get("identity") == "conviction" and p.get("stop_q") == "q05",
+          f"got={p.get('identity')}/{p.get('stop_q')}")
+    check("stop_lines 只有信念一条（q05）",
+          list(lines) == ["conviction"] and lines["conviction"]["quantile"] == "q05", f"got={lines}")
+    check("note 写身份与登记日", p.get("identity_note") == "身份：信念（钉 Q05）；10-19 登记为信念",
+          f"got={p.get('identity_note')}")
+    check("不再写「身份未登记」", "身份未登记" not in json.dumps(p, ensure_ascii=False))
+
+    c = q.conn()
+    ident.set_identity(c, "TST", "speculative", now=datetime(2026, 10, 25, 21, 5, tzinfo=SGT))
+    c.close()
+    p = assistant.build_context("TST")["position"]
+    lines = p.get("stop_lines") or {}
+    sl = lines.get("speculative") or {}
+    check("改为投机 → 只剩 Q25 一条", list(lines) == ["speculative"] and sl.get("quantile") == "q25",
+          f"got={lines}")
+    check("投机线已失效（夹具最新收盘 96 < 本周期冻结 Q25≈97.96）", sl.get("invalidated") is True,
+          f"got={sl}")
+    check("note 写改动", p.get("identity_note") == "身份：投机（钉 Q25）；10-25 由信念改为投机",
+          f"got={p.get('identity_note')}")
+
+
 if __name__ == "__main__":
     test_binance_position_in_context()
     test_identity_unregistered()
@@ -340,6 +384,8 @@ if __name__ == "__main__":
     test_fund_db_unavailable()
     test_asof_before_entry()
     test_journal_still_wins()
+    test_identity_short_unregistered()
+    test_identity_registered()     # 会给 TST 登记身份，必须最后跑
     if _failed:
         print(f"\n{len(_failed)} 项失败: {_failed}")
         sys.exit(1)

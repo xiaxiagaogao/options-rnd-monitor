@@ -9,15 +9,17 @@ import os
 import re
 from pathlib import Path
 
+from rnd import identity as ident
 from rnd.state import STATE_INDICATORS
 
 from . import queries as q
 
 _QUANTS = ("q05", "q25", "q50", "q75", "q95")
 
-# 币安仓位没有投机/信念登记：纪律 3 两条线都给，不替用户选（2026-10 用户定）。
-IDENTITY_NOTE = ("身份未登记：币安仓位没有投机/信念登记。纪律 3 的两条线（投机→Q25、信念→Q05）"
-                 "都列出并各自标注，不替用户假设身份。")
+# 币安仓位未登记投机/信念时：纪律 3 两条线都给，不替用户选（2026-10 用户定）。
+# 登记在标的页完成（holding-identity spec，rnd/identity.py），登记后只认身份那一条。
+IDENTITY_NOTE = ("身份未登记：该币安仓位还没有投机/信念登记。纪律 3 的两条线（投机→Q25、信念→Q05；"
+                 "空头为 Q75 / Q95）都列出并各自标注，不替用户假设身份。")
 
 # LLM 接缝配置（framework §4 / T1）。用户有 Anthropic/OpenAI 兼容中转，接入=填这三行 .env。
 ASSISTANT_MODEL = os.getenv("ASSISTANT_MODEL", "claude-opus-5-5")
@@ -156,8 +158,10 @@ def build_outlook_messages(symbols: list[str], packs: dict | None = None) -> tup
         "- **情景触发**：一条「若…则…」。\n"
         "- 有持仓的标的：这套定价对你的论点是**逆风 / 顺风 / 中性**（挂失效线、偏移）"
         "——判定顺逆风可以，给动作不行。\n"
-        "  · 身份未登记（identity 为 null）的持仓：投机线 Q25 与信念线 Q05 两条都挂、"
+        "  · 身份未登记（identity 为 null）的持仓：投机线与信念线两条都挂、"
         "注明「身份未登记」，不替用户选。\n"
+        "  · 身份已登记的持仓：只按 stop_lines 里那一条线判失效与顺逆风，写明身份；"
+        "identity_note 含改动记录（「由…改为…」）时照写。\n"
         "  · 失效线按包内 frozen_basis 写明口径（本周期冻结 + 冻结日）。\n"
         "  · 是否失效照 invalidated 写；close_basis 非 null（RND 停更）时照它写明失效判定用的是"
         "哪天收盘，与分布日期分开说，已失效的线直说已失效。\n"
@@ -617,7 +621,8 @@ def _binance_position(c, symbol: str, asof: str | None, ind: dict | None,
                       holdings: dict, close: dict) -> dict:
     """币安实际持仓（journal 无开仓时；2026-08-06 口径决策：以 fund 同步为准）。
 
-    - 身份未登记 → identity/stop_q 为 None，stop_lines 同时给投机 Q25 与信念 Q05。
+    - 身份按 holding_identity 登记（跟标的走）：已登记 → stop_lines 只给身份那一条；
+      未登记 → identity/stop_q 为 None，两线并挂（多头 Q25+Q05，空头 Q75+Q95）。
     - 冻结 = 本周期冻结（queries.cycle_freeze_date），与止盈止损页曲线一同一套数；
       标的页持仓卡 / 今日页的灯按入场日冻结，数字会不同。
     - 偏移与失效判定同 journal 轨：(现Q − 冻结Q)/冻结σ1；收盘确认，多头 close < 线 → 失效（空头反向）；
@@ -634,13 +639,17 @@ def _binance_position(c, symbol: str, asof: str | None, ind: dict | None,
     if asof and e.get("rnd_date") and e["rnd_date"] > asof:
         return {"open": False, "note": f"币安当前持仓开于 {e['open_date']}，晚于数据日 {asof}"}
     long = e["qty"] >= 0
+    reg = ident.current(c).get(symbol)
+    idn = reg["identity"] if reg else None
+    stop_q = ident.stop_quantile(idn, long)
     out = {
         "open": True,
         "source": "binance",
         "direction": "long" if long else "short",
-        "identity": None,
-        "stop_q": None,
-        "identity_note": IDENTITY_NOTE,
+        "identity": idn,
+        "stop_q": stop_q,
+        "identity_note": (f"身份：{ident.LABEL[idn]}（钉 {stop_q.upper()}）；{ident.change_note(reg)}"
+                          if idn else IDENTITY_NOTE),
         "entry_price": e["entry_price"],
         "qty": e["qty"],
         "open_date": e["open_date"],
@@ -677,7 +686,8 @@ def _binance_position(c, symbol: str, asof: str | None, ind: dict | None,
             "frozen_gate_pass": bool(fr["gate_pass"]),
             **{f"frozen_{k}": fr[k] for k in _QUANTS}},
         "offset": {k: (ind[k] - fr[k]) / sig for k in _QUANTS} if sig else None,
-        "stop_lines": {"speculative": line("q25"), "conviction": line("q05")},
+        "stop_lines": ({idn: line(stop_q)} if idn
+                       else {k: line(v) for k, v in ident.line_pair(long).items()}),
     }
 
 
