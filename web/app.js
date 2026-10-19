@@ -904,9 +904,9 @@ createApp({
       return zones.filter(Boolean);
     },
     exitMarks(curve, kind, d) {
-      const line = (x, text, color, type, width, position) => ({
+      const line = (x, text, color, type, width, position, labelColor = "#44413C") => ({
         xAxis: x, lineStyle: { color, type, width },
-        label: { formatter: text, position, fontSize: 10, color: "#44413C" },
+        label: { formatter: text, position, fontSize: 10, color: labelColor },
       });
       // 竖线标签：insideEndTop 贴线左侧、insideEndBottom 贴线右侧。成本与收盘靠得近时，
       // 让左边那条的标签朝左、右边那条朝右，两段文字背向而不相撞
@@ -919,8 +919,15 @@ createApp({
                       cost != null && !costLeft ? "insideEndTop" : "insideEndBottom"));
       marks.push(line(curve.s0, `起点 F ${this.fmtPx(curve.s0)}`, "#26241F", "dotted", 1, "insideStartTop"));
       if (kind === "cost") {
-        marks.push(line(curve.q25, `Q25 投机线 ${this.fmtPx(curve.q25)}`, "#C9C5BB", "solid", 1, "insideStartTop"));
-        marks.push(line(curve.q05, `Q05 信念线 ${this.fmtPx(curve.q05)}`, "#C9C5BB", "solid", 1, "insideStartTop"));
+        // 两条候选失效线（holding-identity spec §6.5）：已登记 → 身份那条加深、标「失效线」，另一条变淡
+        const long = !d.position || d.position.qty >= 0;
+        const pair = long ? [["q25", "投机线"], ["q05", "信念线"]] : [["q75", "投机线"], ["q95", "信念线"]];
+        for (const [k, name] of pair) {
+          const sel = d.stop_q === k, faded = !!d.stop_q && !sel;
+          marks.push(line(curve[k], `${k.toUpperCase()} ${name}${sel ? " · 失效线" : ""} ${this.fmtPx(curve[k])}`,
+                          sel ? "#6E6A60" : faded ? "#E4E1D9" : "#C9C5BB", "solid", sel ? 1.6 : 1,
+                          "insideStartTop", faded ? "#8B877C" : "#44413C"));
+        }
       }
       return marks.filter(m => m.xAxis != null);
     },
