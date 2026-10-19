@@ -88,6 +88,7 @@ createApp({
     symbols: [], overview: [], events: [],
     holdings: [], holdingsOutOfPool: [],   // 币安实际持仓（今日页摘要）
     active: "SPY", detail: null, fanData: null, fanDays: 120,
+    identityBusy: false, identityErr: "",   // 币安持仓身份登记（holding-identity）
     densityData: { ok: false }, heatData: null,
     dcdfData: { ok: false }, pitData: { ok: false },
     switchSeq: 0, loadingSym: false, uiFading: false,
@@ -132,15 +133,39 @@ createApp({
         const off = (i[q] - be.frozen[q]) / i.sigma1_abs;
         return (off >= 0 ? "+" : "") + off.toFixed(2) + "σ";
       };
-      return { q05: f("q05"), q25: f("q25") };
+      const out = {};
+      for (const q of ["q05", "q25", "q50", "q75", "q95"]) out[q] = f(q);
+      return out;
     },
-    // 事实陈述：最新收盘是否已跌破入场日 Q05（多头口径；净仓为负则反向）。
-    // 注意与 journal 的语义差别——这里没有"你承诺过的失效线"，只是描述位置。
+    // 判灯那条线：已登记 → 身份线；未登记 → 信念线口径（多头 Q05 / 空头 Q95）
+    beLampQ() {
+      const be = this.binanceEntry;
+      if (!be) return null;
+      return be.stop_q || (be.qty >= 0 ? "q05" : "q95");
+    },
+    // 事实陈述：最新收盘是否已越过入场日那条线（多头跌破、空头升破）。
     // 收盘取 detail.close（服务端 latest_close）：RND 停更时它比数据日新，不取扇形图最后一天的收盘。
     beBreached() {
-      const be = this.binanceEntry, close = this.detail && this.detail.close;
-      if (!be || !be.frozen || close == null) return false;
-      return be.qty >= 0 ? close < be.frozen.q05 : close > be.frozen.q05;
+      const be = this.binanceEntry, close = this.detail && this.detail.close, k = this.beLampQ;
+      if (!be || !be.frozen || close == null || be.frozen[k] == null) return false;
+      return be.qty >= 0 ? close < be.frozen[k] : close > be.frozen[k];
+    },
+    beLampText() {
+      const be = this.binanceEntry, k = this.beLampQ;
+      if (!be || !k) return "";
+      const verb = be.qty < 0 ? "升破" : "跌破";
+      const tag = be.stop_q ? `（${be.identity === "conviction" ? "信念" : "投机"}线）` : "";
+      return this.beBreached ? `已${verb}入场日 ${k.toUpperCase()}${tag}` : `未${verb} ${k.toUpperCase()}${tag}`;
+    },
+    // 两条候选失效线（holding-identity spec §4）：多头 投机 Q25 / 信念 Q05，空头镜像 Q75 / Q95
+    beLines() {
+      const be = this.binanceEntry;
+      if (!be) return [];
+      const long = be.qty >= 0;
+      return [
+        { identity: "speculative", label: "投机", q: long ? "q25" : "q75" },
+        { identity: "conviction", label: "信念", q: long ? "q05" : "q95" },
+      ];
     },
     // 判灯收盘日 ≠ 数据日（该标的 RND 停更）时，灯旁注明用的是哪天收盘；相同不注（页头已有数据日）。
     lampCloseNote() {
@@ -1033,6 +1058,30 @@ createApp({
       });
       await this.switchSymbol(this.active);
       this.overview = (await api("/api/overview")).symbols;
+    },
+    // 币安持仓身份：首次登记直接存；改动先确认（改身份 = 挪失效线，留记录）
+    async setIdentity(identity) {
+      const be = this.binanceEntry;
+      if (!be || this.identityBusy || be.identity === identity) return;
+      if (be.identity) {
+        const from = this.beLines.find(l => l.identity === be.identity);
+        const to = this.beLines.find(l => l.identity === identity);
+        if (!confirm(`把 ${this.detail.symbol} 从${from.label}改为${to.label}？` +
+                     `失效线将由 ${from.q.toUpperCase()} 改为 ${to.q.toUpperCase()}，改动会留记录。`)) return;
+      }
+      this.identityBusy = true;
+      this.identityErr = "";
+      try {
+        await api("/api/holdings/identity", {
+          method: "POST", body: JSON.stringify({ symbol: this.detail.symbol, identity }),
+        });
+        await this.switchSymbol(this.active);
+      } catch (e) {
+        if (e.auth) { this.view = "login"; return; }
+        this.identityErr = e.detail || "身份没保存成功，请重试";
+      } finally {
+        this.identityBusy = false;
+      }
     },
   },
   mounted() {

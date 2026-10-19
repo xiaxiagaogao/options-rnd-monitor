@@ -340,7 +340,7 @@
                 <span v-else-if="binanceEntry && binanceEntry.frozen" class="gate-mini">
                   <span class="lamp" :class="beBreached ? 'bad':'ok'"></span>
                   <span :style="{color: beBreached ? '#A33B2E':'#3E7A52', fontWeight:600, fontSize:'12px'}">
-                    {{ beBreached ? '已跌破入场日 Q05' : '未跌破 Q05' }}</span>
+                    {{ beLampText }}</span>
                   <span v-if="lampCloseNote" class="annot">· {{ lampCloseNote }}</span></span>
               </div>
               <template v-if="myPosition">
@@ -368,22 +368,24 @@
                     入场 {{ binanceEntry.open_date }} @ {{ fmt(binanceEntry.entry_price,1) }} ·
                     币安实际持仓
                   </div>
+                  <div class="id-row">
+                    <span class="annot">身份</span>
+                    <button v-for="l in beLines" :key="l.identity" class="chip"
+                            :class="{on: binanceEntry.identity === l.identity}" :disabled="identityBusy"
+                            :aria-pressed="binanceEntry.identity === l.identity"
+                            @click="setIdentity(l.identity)">{{ l.label }} · {{ l.q.toUpperCase() }}</button>
+                    <span class="annot">{{ binanceEntry.identity_note || '身份未登记，两条线都列出' }}</span>
+                  </div>
+                  <div v-if="identityErr" class="annot" style="color:#A33B2E">{{ identityErr }}</div>
                   <template v-if="binanceEntry.frozen && beOffset">
-                    <div class="trio">
-                      <div><div class="tname">冻结 Q05</div>
-                        <div class="tval">{{ fmt(binanceEntry.frozen.q05,1) }}</div></div>
-                      <div><div class="tname">实时 Q05</div>
-                        <div class="tval">{{ fmt(ind.q05,1) }}</div></div>
+                    <div v-for="l in beLines.slice().reverse()" :key="l.q" class="trio"
+                         :class="{dim: binanceEntry.stop_q && binanceEntry.stop_q !== l.q}">
+                      <div><div class="tname">冻结 {{ l.q.toUpperCase() }}{{ binanceEntry.stop_q === l.q ? ' · 失效线' : '' }}</div>
+                        <div class="tval">{{ fmt(binanceEntry.frozen[l.q],1) }}</div></div>
+                      <div><div class="tname">实时 {{ l.q.toUpperCase() }}</div>
+                        <div class="tval">{{ fmt(ind[l.q],1) }}</div></div>
                       <div><div class="tname">偏移量</div>
-                        <div class="tval">{{ beOffset.q05 }}</div></div>
-                    </div>
-                    <div class="trio">
-                      <div><div class="tname">冻结 Q25</div>
-                        <div class="tval">{{ fmt(binanceEntry.frozen.q25,1) }}</div></div>
-                      <div><div class="tname">实时 Q25</div>
-                        <div class="tval">{{ fmt(ind.q25,1) }}</div></div>
-                      <div><div class="tname">偏移量</div>
-                        <div class="tval">{{ beOffset.q25 }}</div></div>
+                        <div class="tval">{{ beOffset[l.q] }}</div></div>
                     </div>
                   </template>
                   <div v-else class="annot">入场日无钉住行（该日闸门未过），无法给出冻结分位</div>

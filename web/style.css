@@ -308,3 +308,11 @@ body {
   border-radius: 4px; padding: 5px 10px; margin: 6px 0 2px; }
 .exit-chart { height: 300px; margin-top: 6px; }
 .side-nav-item:focus-visible, .sym:focus-visible { outline: 2px solid #2F6B8F; outline-offset: 2px; }
+
+/* 币安持仓身份（holding-identity）：chip 补焦点 / 禁用态；身份行；非身份线降为次要色
+   （不用 opacity——40% 透明度下读数对比度只有约 2.4:1，次要色保持可读） */
+.chip:focus-visible { outline: 2px solid #2F6B8F; outline-offset: 2px; }
+.chip:disabled { opacity: .5; cursor: default; }
+.id-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0 2px; }
+.trio.dim .tname, .trio.dim .tval { color: #8B877C; }
+.trio.dim .tval { font-weight: 600; }
