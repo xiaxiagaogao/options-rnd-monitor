@@ -173,6 +173,33 @@ def overview() -> dict:
     return {"symbols": out, "holdings": holdings, "holdings_out_of_pool": out_of_pool}
 
 
+def identity_info(c, symbol: str, long: bool) -> dict:
+    """币安持仓身份（holding-identity spec §6.3）：当前身份、选中的失效分位、白话、变更记录（新的在前）。"""
+    from rnd import identity as ident
+    hist = ident.history(c, symbol)
+    cur = hist[0] if hist else None
+    idn = cur["identity"] if cur else None
+    return {"identity": idn, "stop_q": ident.stop_quantile(idn, long),
+            "identity_note": ident.change_note(cur), "identity_history": hist}
+
+
+def holding_identity_set(payload: dict) -> dict:
+    """登记 / 改动币安持仓身份。只收当前持有的标的（跟标的走，标的页卡片才有入口）。"""
+    from rnd import holdings_sync, identity as ident
+    sym = str(payload.get("symbol") or "").strip().upper()
+    idn = payload.get("identity")
+    if idn not in ident.IDENTITIES:
+        return {"ok": False, "error": "身份只能是 speculative（投机）或 conviction（信念）"}
+    c = conn()
+    try:
+        if sym not in holdings_sync.entry_dates(c):
+            return {"ok": False, "error": f"{sym or '（空）'} 当前无币安持仓，不能登记身份"}
+        rec = ident.set_identity(c, sym, idn)
+        return {"ok": True, **rec, "identity_history": ident.history(c, sym)}
+    finally:
+        c.close()
+
+
 def symbol_detail(symbol: str) -> dict:
     c = conn()
     d = latest_date(c, symbol)
@@ -210,6 +237,8 @@ def symbol_detail(symbol: str) -> dict:
             c, "SELECT date, q05, q25, q50, q75, q95, sigma1_abs FROM rnd_indicators"
                " WHERE symbol=? AND date=? AND pinned=1",
             (symbol, binance_entry["rnd_date"]))
+    if binance_entry:
+        binance_entry |= identity_info(c, symbol, binance_entry["qty"] >= 0)
     # 两盏持仓灯（journal 冻结线 / 币安入场日 Q05）的判定收盘；RND 停更时 close_date 晚于 date。
     close, close_date = latest_close(c, symbol, d, global_latest_date(c))
     c.close()
@@ -661,7 +690,7 @@ def _close_on(c, symbol: str, date: str) -> float | None:
 
 def _exit_dist(c, symbol: str, date: str) -> dict | None:
     """某日 pinned 分布：指标行 + CDF 网格 + 外推边界。缺指标行或曲线 → None。"""
-    ind = _row(c, "SELECT date, expiry, dte, forward, gate_pass, q05, q25 FROM rnd_indicators"
+    ind = _row(c, "SELECT date, expiry, dte, forward, gate_pass, q05, q25, q75, q95 FROM rnd_indicators"
                   " WHERE symbol=? AND date=? AND pinned=1", (symbol, date))
     if ind is None:
         return None
@@ -699,7 +728,8 @@ def _pack_exit_curve(dist: dict, anchor: float, qty: float | None, axis) -> dict
     return {
         "date": dist["date"], "expiry": dist["expiry"], "dte": dist["dte"],
         "gate_pass": bool(dist["gate_pass"]), "s0": dist["forward"], "anchor": anchor,
-        "q05": dist["q05"], "q25": dist["q25"], "k_quoted": dist["k_quoted"],
+        "q05": dist["q05"], "q25": dist["q25"], "q75": dist["q75"], "q95": dist["q95"],
+        "k_quoted": dist["k_quoted"],
         "grid": [float(dist["strikes"][0]), float(dist["strikes"][-1])],
         **{side: {"prices": rnd_(b["prices"], 4), "expiry_prob": rnd_(b["expiry_prob"], 5),
                   "touch_hi": rnd_(b["touch_hi"], 5), "pct": rnd_(b["pct"], 5),
@@ -748,6 +778,7 @@ def exit_curves(symbol: str) -> dict:
         if today is None or close is None:
             return {"ok": False, "symbol": symbol, "error": f"{symbol} 暂无可用的 RND 分布"}
         pos = holdings_sync.entry_dates(c).get(symbol)
+        idinfo = identity_info(c, symbol, pos["qty"] >= 0) if pos else {}
         frozen = cycle_start = None
         if pos:
             fd, cycle_start = cycle_freeze_date(c, symbol, today["expiry"], pos.get("rnd_date"))
@@ -768,6 +799,7 @@ def exit_curves(symbol: str) -> dict:
     return {
         "ok": True, "symbol": symbol, "date": d, "close": close, "dte_now": today["dte"],
         "axis": [lo, hi],
+        "identity": idinfo.get("identity"), "stop_q": idinfo.get("stop_q"),
         "position": None if not pos else {
             k: pos[k] for k in ("qty", "entry_price", "open_date", "rnd_date")},
         "curves": curves,

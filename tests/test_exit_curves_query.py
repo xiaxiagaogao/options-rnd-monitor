@@ -152,6 +152,26 @@ def test_list():
           and h["close"] == 103.7)
 
 
+def test_identity_fields():
+    print("\n[身份] exit_curves 带 identity / stop_q；cost 曲线补 q75 / q95")
+    from rnd import identity as ident
+    ENTRIES.clear()
+    ENTRIES["TST"] = entry("2026-08-04", 100.0, 2.0)
+    r = q.exit_curves("TST")
+    check("未登记 → identity / stop_q 为 None", r["identity"] is None and r["stop_q"] is None,
+          f"{r.get('identity')}/{r.get('stop_q')}")
+    check("cost 曲线带 q75 / q95 键", {"q75", "q95"} <= set(r["curves"]["cost"]),
+          str(sorted(r["curves"]["cost"])))
+    c = q.conn()
+    ident.set_identity(c, "TST", "conviction")
+    c.close()
+    r = q.exit_curves("TST")
+    check("登记信念 → stop_q q05", r["identity"] == "conviction" and r["stop_q"] == "q05",
+          f"{r.get('identity')}/{r.get('stop_q')}")
+    r = q.exit_curves("OTH")
+    check("无持仓标的 → identity None", r["identity"] is None and r["stop_q"] is None)
+
+
 def test_auth():
     print("\n[鉴权] 两个新路由未登录一律 401")
     client = TestClient(api.app)
@@ -161,7 +181,7 @@ def test_auth():
 
 if __name__ == "__main__":
     for t in (test_cycle_start, test_entry_in_cycle, test_deep_underwater_and_short,
-              test_no_position_and_json, test_list, test_auth):
+              test_no_position_and_json, test_list, test_identity_fields, test_auth):
         t()
     print(f"\n{'ALL PASS' if not _failed else 'FAILED: ' + ', '.join(_failed)}")
     sys.exit(1 if _failed else 0)

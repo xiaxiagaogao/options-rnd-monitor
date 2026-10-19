@@ -143,6 +143,15 @@ def journal_close(payload: dict = Body(...)):
     return q.journal_close(payload)
 
 
+@app.post("/api/holdings/identity", dependencies=[Depends(require_auth)])
+def holdings_identity(payload: dict = Body(...)):
+    """币安持仓身份登记（holding-identity spec §6.2）：非法身份 / 非当前持仓 → 400。"""
+    r = q.holding_identity_set(payload)
+    if not r["ok"]:
+        raise HTTPException(400, r["error"])
+    return r
+
+
 @app.get("/api/symbol/{symbol}/dcdf", dependencies=[Depends(require_auth)])
 def dcdf(symbol: str):
     return q.dcdf(valid_symbol(symbol))
