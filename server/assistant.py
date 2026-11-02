@@ -370,27 +370,41 @@ def load_holdings() -> dict:
         c.close()
 
 
-def build_context(symbol: str, asof: str | None = None, *, holdings: dict | None = None) -> dict:
-    """holdings：load_holdings() 的结果；None → 本函数自读。"""
+def build_context(symbol: str, asof: str | None = None, *, holdings: dict | None = None,
+                  include_position: bool = True) -> dict:
+    """装配上下文包。
+
+    asof：数据日上限。显式传入时取 ≤ asof 的最近 pinned 日（回放不读未来）；
+    省略 = 该标的最新 pinned 日。holdings：load_holdings() 的结果；None → 本函数自读。
+    include_position=False：完全跳过持仓/币安/journal 读取，输出里也没有 position 键
+    （O1 时间点上下文用；不是「先算再删」）。
+    """
     symbol = symbol.upper()
     c = q.conn()
+    # 显式 asof 先收敛到「≤ asof 的最近 pinned 日」：既杜绝未来，也容忍周末/停更。
+    # 注意不能写成 asof or latest_date(...)：asof 早于第一条 RND 时会被悄悄换成最新日。
+    requested_asof = asof
+    asof = (q.latest_date(c, symbol, requested_asof) if requested_asof is not None
+            else q.latest_date(c, symbol))
     # 判失效的收盘封顶日：显式 asof（历史回放不读未来）或全池最新数据日。
-    close_cap = asof or q.global_latest_date(c)
-    asof = asof or q.latest_date(c, symbol)
+    # 用 requested_asof 而不是收敛后的 asof：RND 停更时仍要拿停更日到全池最新日之间的收盘判失效。
+    close_cap = requested_asof if requested_asof is not None else q.global_latest_date(c)
     ind = q._row(
         c, "SELECT * FROM rnd_indicators WHERE symbol=? AND date=? AND pinned=1",
         (symbol, asof))
     states = q.state_at(c, symbol, asof) if asof else []
     bench = q.benchmark_of(symbol)
     bench_states = q.state_at(c, bench, asof) if asof else []
-    positions = q.open_positions(c, symbol)
-    close = _close(c, symbol, asof, close_cap)
-    if positions:
-        position = _position(ind, positions, close)
-    else:
-        position = _binance_position(c, symbol, asof, ind,
-                                     holdings if holdings is not None else load_holdings(),
-                                     close)
+    position = None
+    if include_position:
+        positions = q.open_positions(c, symbol)
+        close = _close(c, symbol, asof, close_cap)
+        if positions:
+            position = _position(ind, positions, close)
+        else:
+            position = _binance_position(c, symbol, asof, ind,
+                                         holdings if holdings is not None else load_holdings(),
+                                         close)
     c.close()
 
     meta = {
@@ -399,16 +413,18 @@ def build_context(symbol: str, asof: str | None = None, *, holdings: dict | None
         "pinned_expiry": ind["expiry"] if ind else None,
         "dte": ind["dte"] if ind else None,
     }
-    return {
+    out = {
         "meta": meta,
         "location": _location(ind),
         "state": _state(states),
         "quality": _quality(ind),
         "benchmark": _benchmark(bench, bench_states),
-        "position": position,
         "events": _events(symbol, asof),
         "summary": _summary(symbol, asof, ind),
     }
+    if include_position:
+        out["position"] = position
+    return out
 
 
 def _location(ind: dict | None) -> dict:
@@ -692,10 +708,13 @@ def _binance_position(c, symbol: str, asof: str | None, ind: dict | None,
 
 
 def _events(symbol: str, asof: str | None) -> list[dict]:
-    """近窗事件，与仪表盘 events 同源口径（framework §3.3）；分位越线事件补方向白话。"""
+    """近窗事件，与仪表盘 events 同源口径（framework §3.3）；分位越线事件补方向白话。
+
+    asof 同时封顶指标事件与分位越阈（q.events 内部已按 date ≤ asof 截断）。
+    """
     if not asof:
         return []
-    evs = q.events(symbol, days=90).get("events", [])
+    evs = q.events(symbol, days=90, asof=asof).get("events", [])
     for e in evs:
         if e.get("kind") == "extreme" and e.get("indicator"):
             e["reading"] = direction_reading(e["indicator"], None, e.get("pct"))
@@ -707,7 +726,7 @@ def _summary(symbol: str, asof: str | None, ind: dict | None) -> dict:
 
     全网格曲线、原始链默认不进包（framework §3.3）——此处只取标量，剔除 points/curve。
     """
-    pit = q.pit(symbol) if asof else {"ok": False, "reason": "无数据日"}
+    pit = q.pit(symbol, asof) if asof else {"ok": False, "reason": "无数据日"}
     gate_diagnostics = None
     if ind is not None and not bool(ind["gate_pass"]):
         d = q.diagnostics(symbol, asof, ind["expiry"])

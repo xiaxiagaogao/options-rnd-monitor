@@ -75,8 +75,10 @@ CREATE TABLE IF NOT EXISTS holding_identity (
 ### 6.2 `server/api.py`
 
 `POST /api/holdings/identity`，`dependencies=[Depends(require_auth)]`（同 journal 写接口）。
-请求体 `{symbol, identity}`；symbol 须是当前币安持仓（`holdings_sync.entry_dates` 里有），否则 400「当前无币安持仓」；identity 非法 400。
+请求体 `{symbol, identity}`；symbol 须在 RND 标的池（`symbols.yaml` 的 baseline ∪ holdings ∪ pinned，与 overview / 止盈止损页同一口径）内，否则 400「不在 RND 标的池」；identity 非法 400。
 返回 `set_identity` 结果 + `history`。
+
+> 2026-10 放宽：原先要求 symbol 当前在 `holdings_sync.entry_dates`（fund.db 有持仓）。身份本来就「跟标的走」，平仓后记录保留、重新开仓自动沿用，因此登记入口不再绑定当前持仓。
 
 ### 6.3 `server/queries.py`
 
@@ -104,7 +106,7 @@ CREATE TABLE IF NOT EXISTS holding_identity (
 
 ## 7. 错误处理
 
-- POST 非法身份 / 非当前持仓 → 400，前端提示错误、保持原状态不变。
+- POST 非法身份 / 标的在 RND 池外 → 400，前端提示错误、保持原状态不变。
 - 写库失败 → 500，前端同上。
 - fund.db 读不到 → `binance_entry` 为 None，卡片不出现，无从登记；展望仍走 `open=None` 分支（不变）。
 - 已不再持有的标的，其身份记录保留，重新开仓时自动沿用（跟标的走）。
@@ -113,7 +115,7 @@ CREATE TABLE IF NOT EXISTS holding_identity (
 
 - `tests/test_holding_identity.py`（新，临时库）：首次登记、相同值 no-op、改动记 prev、history 顺序、非法身份报错、`stop_quantile` 全矩阵（含空头）、`change_note` 文案。
 - 展望上下文（扩 `tests/test_assistant_holdings.py`）：已登记信念 → `stop_lines` 只有 q05 一条、note 含登记日；改过身份 → note 含「由投机改为信念」；未登记 → 与现状一致；空头镜像。
-- 接口：`POST /api/holdings/identity` 的 400 分支与成功路径；`symbol_detail` / `exit_curves` 返回新字段。
+- 接口：`POST /api/holdings/identity` 的 400 分支与成功路径；池内未持有也能登记（放宽后）、池外 400；`symbol_detail` / `exit_curves` 返回新字段。
 - 前端：本机免鉴权 dev server + headless 截图（只验桌面）：登记、改动确认、淡化与灯文案、止盈止损页高亮；控制台零错误。
 - 部署：scp 改动文件 → 重启 → 三方校验；首登记由用户在面板上完成。
 

@@ -36,6 +36,46 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/uvicorn server.api:app --port 8600
 ```
 
+## 时间点上下文 API（O1）
+
+供外部交易/回放程序按日期读取行情侧 RND 上下文。**只读、不调 LLM、不含现货持仓信息**（数量、均价、journal 未平仓、币安持仓卡都不返回）。
+
+- 请求：`GET /api/context/{symbol}?asof=YYYY-MM-DD`；`asof` 可省略（= 最新 RND 日）。
+- 鉴权：请求头 `Authorization: Bearer <CONTEXT_API_TOKEN>`。环境变量未配置 → 一律 `503`；token 缺失/错误 → `401`。该 token 只作用于本路由，面板的 cookie 会话不受影响。
+- 日期语义：`asof` 是请求的日期；`date` 是实际使用的 RND 日（`≤ asof` 的最近 pinned 交易日，没有则 `null`）。`asof` 早于该标的第一条 RND → `200`，`date` / `distribution` 为 `null`。
+- `distribution` 用的是与 Q05/Q25/Q75/Q95 失效线**同一条曲线**：`rnd_indicators` 的 pinned 行（最接近 30 DTE 的到期）对应的 `rnd_curve` 网格；`strikes` 升序，`cdf` 等长。
+- `identity` 取 `holding_identity` 中 `changed_at` 不晚于 `asof` 当天结束的最新一行。
+- `context_hash`：响应里除 `context_hash` 和 `generated_at` 之外的全部字段做规范化 JSON（`sort_keys`、无空格、浮点按 Python `repr`）后的 sha256；同样的内容任何时候请求都得到同一个哈希，调用方用它判断内容是否变了。
+- `identity` 按美东日期判定：`changed_at` 换算到 America/New_York 后的日期 ≤ `asof` 的最新一行。
+- 错误：非法 symbol / 不在池中 → `404`；`asof` 格式错 → `400`。
+
+示例（数字全是合成值）：
+
+```bash
+curl -H "Authorization: Bearer $CONTEXT_API_TOKEN" \
+  "http://127.0.0.1:8600/api/context/TST?asof=2026-08-05"
+```
+
+```json
+{
+  "symbol": "TST",
+  "asof": "2026-08-05",
+  "date": "2026-08-05",
+  "gate_pass": true,
+  "distribution": {
+    "asof": "2026-08-05",
+    "expiry": "2026-08-05",
+    "forward": 100.0,
+    "strikes": [80.0, 90.0, 100.0, 110.0, 120.0],
+    "cdf": [0.02, 0.16, 0.5, 0.84, 0.98]
+  },
+  "identity": {"identity": "speculative", "changed_at": "2026-08-04T09:30:00+08:00"},
+  "context": {"meta": {"symbol": "TST", "asof": "2026-08-05"}, "...": "同 build_context，但无 position 键"},
+  "context_hash": "<sha256>",
+  "generated_at": "2026-08-05T23:59:59+00:00"
+}
+```
+
 ## 结构
 
 | 目录 | 内容 |

@@ -30,8 +30,16 @@ def check(name, ok, detail=""):
 tmp = Path(tempfile.mkdtemp()) / "ident.sqlite"
 db.get_conn(tmp).close()
 q.conn = lambda: db.get_conn(tmp)
-HELD = {"AAA": {"qty": 2.0}, "SSS": {"qty": -1.0}}      # 合成：一多一空
-holdings_sync.entry_dates = lambda conn, *a, **k: HELD
+# O3 放宽后只要求标的在 RND 池里：这里用合成池，且 fund.db 持仓读取直接抛错，
+# 证明登记路径不再依赖「当前持有」。
+q.get_symbols = lambda: ["AAA", "SSS"]
+
+
+def _no_holdings_read(*a, **k):
+    raise AssertionError("holding_identity_set 不应再读 fund.db 持仓")
+
+
+holdings_sync.entry_dates = _no_holdings_read
 URL = "/api/holdings/identity"
 
 print("[鉴权] 未登录 → 401")
@@ -45,14 +53,15 @@ print("[校验] 非法输入 → 400，不写库")
 r = client.post(URL, json={"symbol": "AAA", "identity": "yolo"})
 check("非法身份 400", r.status_code == 400, f"{r.status_code} {r.text}")
 r = client.post(URL, json={"symbol": "ZZZ", "identity": "conviction"})
-check("无币安持仓 400 且提示", r.status_code == 400 and "无币安持仓" in r.text, f"{r.status_code} {r.text}")
+check("池外标的 400 且提示", r.status_code == 400 and "不在 RND 标的池" in r.text,
+      f"{r.status_code} {r.text}")
 c = q.conn()
 check("两次失败都没写行", c.execute("SELECT COUNT(*) FROM holding_identity").fetchone()[0] == 0)
 c.close()
 
-print("[写入] 登记 / 重复 / 改动")
+print("[写入] 池内未持有也能登记 / 重复 / 改动")
 r = client.post(URL, json={"symbol": "aaa", "identity": "conviction"}).json()
-check("登记成功", r["ok"] and r["changed"] and r["identity"] == "conviction"
+check("登记成功（不要求当前持仓）", r["ok"] and r["changed"] and r["identity"] == "conviction"
       and r["symbol"] == "AAA" and len(r["identity_history"]) == 1, str(r))
 r = client.post(URL, json={"symbol": "AAA", "identity": "conviction"}).json()
 check("相同身份 changed=False", r["ok"] and r["changed"] is False, str(r))

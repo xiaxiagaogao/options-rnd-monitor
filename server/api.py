@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from rnd.config import PROJECT_ROOT  # 顺带加载 .env
+from . import context as context_api
 from . import queries as q
 
 SESSION_MAX_AGE = 30 * 24 * 3600
@@ -59,6 +60,20 @@ def require_auth(rnd_session: str | None = Cookie(default=None),
         _signer.loads(token, max_age=SESSION_MAX_AGE)
     except BadSignature:
         raise HTTPException(401, "会话失效")
+
+
+def require_context_token(authorization: str | None = Header(default=None)):
+    """机器 token 鉴权，只给 GET /api/context/{symbol} 用；不改面板的 require_auth。
+
+    CONTEXT_API_TOKEN 未配置 → 一律 503（绝不退化成不鉴权）；token 缺失/错误 → 401。
+    错误信息与日志都不包含 token 本身。
+    """
+    expected = os.getenv("CONTEXT_API_TOKEN")
+    if not expected:
+        raise HTTPException(503, "上下文接口未配置")
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(401, "未授权", headers={"WWW-Authenticate": "Bearer"})
 
 
 _login_fails: deque[float] = deque()
@@ -108,6 +123,21 @@ def symbol_detail(symbol: str):
     return q.symbol_detail(valid_symbol(symbol))
 
 
+@app.get("/api/context/{symbol}")
+def context(symbol: str, asof: str | None = None,
+            authorization: str | None = Header(default=None)):
+    """时间点上下文（O1）：机器 token 鉴权，只读，不含现货持仓信息。"""
+    require_context_token(authorization)
+    sym = (symbol or "").upper()
+    # 这里刻意不用 valid_symbol：它按面板口径返回 400；O1 约定非法/池外一律 404。
+    if not SYMBOL_RE.match(sym) or sym not in q.get_symbols():
+        raise HTTPException(404, f"标的不在池中: {symbol}")
+    try:
+        return context_api.build_payload(sym, asof)
+    except context_api.BadAsof as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.get("/api/symbol/{symbol}/fan", dependencies=[Depends(require_auth)])
 def fan(symbol: str, days: int = 120):
     return q.fan(valid_symbol(symbol), days)
@@ -145,7 +175,7 @@ def journal_close(payload: dict = Body(...)):
 
 @app.post("/api/holdings/identity", dependencies=[Depends(require_auth)])
 def holdings_identity(payload: dict = Body(...)):
-    """币安持仓身份登记（holding-identity spec §6.2）：非法身份 / 非当前持仓 → 400。"""
+    """标的身份登记（holding-identity spec §6.2）：非法身份 / 标的在 RND 池外 → 400。"""
     r = q.holding_identity_set(payload)
     if not r["ok"]:
         raise HTTPException(400, r["error"])

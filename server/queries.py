@@ -61,9 +61,14 @@ def conn():
     return db.get_conn()
 
 
-def latest_date(c, symbol: str) -> str | None:
-    r = c.execute("SELECT MAX(date) FROM rnd_indicators WHERE symbol=? AND pinned=1",
-                  (symbol,)).fetchone()
+def latest_date(c, symbol: str, asof: str | None = None) -> str | None:
+    """该标的 pinned 指标的最新日期；给 asof 时取 ≤ asof 的最新一天（回放不读未来）。"""
+    if asof is None:
+        r = c.execute("SELECT MAX(date) FROM rnd_indicators WHERE symbol=? AND pinned=1",
+                      (symbol,)).fetchone()
+    else:
+        r = c.execute("SELECT MAX(date) FROM rnd_indicators"
+                      " WHERE symbol=? AND pinned=1 AND date<=?", (symbol, asof)).fetchone()
     return r[0] if r else None
 
 
@@ -184,16 +189,18 @@ def identity_info(c, symbol: str, long: bool) -> dict:
 
 
 def holding_identity_set(payload: dict) -> dict:
-    """登记 / 改动币安持仓身份。只收当前持有的标的（跟标的走，标的页卡片才有入口）。"""
-    from rnd import holdings_sync, identity as ident
+    """登记 / 改动标的身份。只收 RND 池内标的（身份跟标的走，不再要求当前持有）。"""
+    from rnd import identity as ident
     sym = str(payload.get("symbol") or "").strip().upper()
     idn = payload.get("identity")
     if idn not in ident.IDENTITIES:
         return {"ok": False, "error": "身份只能是 speculative（投机）或 conviction（信念）"}
+    # 池 = symbols.yaml 的 baseline ∪ holdings ∪ pinned（与 overview / 止盈止损页同一权威口径）。
+    # 2026-10 放宽：不再要求 fund.db 当前持有——平仓后身份仍跟标的走，重新开仓自动沿用。
+    if sym not in get_symbols():
+        return {"ok": False, "error": f"{sym or '（空）'} 不在 RND 标的池，不能登记身份"}
     c = conn()
     try:
-        if sym not in holdings_sync.entry_dates(c):
-            return {"ok": False, "error": f"{sym or '（空）'} 当前无币安持仓，不能登记身份"}
         rec = ident.set_identity(c, sym, idn)
         return {"ok": True, **rec, "identity_history": ident.history(c, sym)}
     finally:
@@ -445,15 +452,18 @@ def heatmap(symbol: str) -> dict:
     return _heatmap_cached(symbol, d or "")
 
 
-def events(symbol: str | None = None, days: int = 90) -> dict:
+def events(symbol: str | None = None, days: int = 90, asof: str | None = None) -> dict:
+    """近窗事件；给 asof 时只取 date ≤ asof 的行（回放不读未来）。"""
     c = conn()
     syms = [symbol] if symbol else get_symbols()
     evs = []
     for sym in syms:
+        date_cap = " AND date<=?" if asof is not None else ""
+        params = (sym, asof, days) if asof is not None else (sym, days)
         df = pd.read_sql_query(
             "SELECT date, expiry, roll, gate_pass, n_modes, modes_json FROM rnd_indicators"
-            " WHERE symbol=? AND pinned=1 ORDER BY date DESC LIMIT ?",
-            c, params=(sym, days))
+            " WHERE symbol=? AND pinned=1" + date_cap + " ORDER BY date DESC LIMIT ?",
+            c, params=params)
         for _, r in df.iterrows():
             if r["roll"] == 1:
                 evs.append({"date": r["date"], "symbol": sym, "kind": "roll",
@@ -466,10 +476,14 @@ def events(symbol: str | None = None, days: int = 90) -> dict:
                 pk = " / ".join(f"{p['strike']:.0f}({p['mass']:.0%})" for p in peaks[:2])
                 evs.append({"date": r["date"], "symbol": sym, "kind": "bimodal",
                             "glyph": "◆", "text": f"双峰：{pk}"})
-        # 分位越阈（进入 ≥90 或 ≤10）
+        # 分位越阈（进入 ≥90 或 ≤10）。回放时同样以 asof 封顶：
+        # 先按 asof 截断再取近窗，否则未来日会参与相邻两日的越阈比较。
+        state_params = ((sym, asof, days * len(STATE_INDICATORS)) if asof is not None
+                        else (sym, days * len(STATE_INDICATORS)))
         st = pd.read_sql_query(
             "SELECT date, indicator, pct FROM rnd_state WHERE symbol=? AND pct IS NOT NULL"
-            " ORDER BY date DESC LIMIT ?", c, params=(sym, days * len(STATE_INDICATORS)))
+            + date_cap + " ORDER BY date DESC LIMIT ?",
+            c, params=state_params)
         st = st.iloc[::-1]
         for ind_name, g in st.groupby("indicator"):
             p = g["pct"].to_numpy()
@@ -477,11 +491,11 @@ def events(symbol: str | None = None, days: int = 90) -> dict:
             for i in range(1, len(p)):
                 if p[i] >= 90 and p[i - 1] < 90:
                     evs.append({"date": dts[i], "symbol": sym, "kind": "extreme",
-                                "glyph": "⚠", "pct": p[i], "indicator": ind_name,
+                                "glyph": "⚠", "pct": float(p[i]), "indicator": ind_name,
                                 "text": f"{LABELS.get(ind_name, ind_name)} 升至 P{p[i]:.0f}"})
                 elif p[i] <= 10 and p[i - 1] > 10:
                     evs.append({"date": dts[i], "symbol": sym, "kind": "extreme",
-                                "glyph": "⚠", "pct": p[i], "indicator": ind_name,
+                                "glyph": "⚠", "pct": float(p[i]), "indicator": ind_name,
                                 "text": f"{LABELS.get(ind_name, ind_name)} 降至 P{p[i]:.0f}"})
     evs.sort(key=lambda e: e["date"], reverse=True)
     c.close()
@@ -590,8 +604,11 @@ def dcdf(symbol: str) -> dict:
 
 
 @lru_cache(maxsize=8)
-def _pit_cached(symbol: str, latest: str) -> dict:
+def _pit_cached(symbol: str, asof: str) -> dict:
     """PIT 校准：历史 pinned 分布的 CDF 代入到期日实际收盘。
+
+    asof 同时封顶样本日（i.date）与到期日（i.expiry）：asof 当天还没到期的分布
+    没有已实现收盘，不能进入 PIT。缓存键带 asof，回放不同日期不会串味。
 
     样本按日重叠（自相关），独立到期数另行报告；RN 含风险溢价，
     偏离均匀是预期而非缺陷——这张图量化的就是那个楔子（spec §6 解读铁律）。"""
@@ -599,11 +616,13 @@ def _pit_cached(symbol: str, latest: str) -> dict:
     rows = pd.read_sql_query(
         "SELECT i.date, i.expiry, c.grid_json FROM rnd_indicators i"
         " JOIN rnd_curve c USING (date, symbol, expiry)"
-        " WHERE i.symbol=? AND i.pinned=1 AND i.expiry <= ? ORDER BY i.date",
-        c, params=(symbol, latest))
+        " WHERE i.symbol=? AND i.pinned=1 AND i.date <= ? AND i.expiry <= ?"
+        " ORDER BY i.date",
+        c, params=(symbol, asof, asof))
     closes = pd.read_sql_query(
-        "SELECT DISTINCT date, underlying_close FROM raw_chain WHERE symbol=? ORDER BY date",
-        c, params=(symbol,))
+        "SELECT DISTINCT date, underlying_close FROM raw_chain"
+        " WHERE symbol=? AND date <= ? ORDER BY date",
+        c, params=(symbol, asof))
     c.close()
     close_map = dict(zip(closes["date"], closes["underlying_close"].astype(float)))
     trading_days = sorted(close_map)
@@ -638,9 +657,10 @@ def _pit_cached(symbol: str, latest: str) -> dict:
     }
 
 
-def pit(symbol: str) -> dict:
+def pit(symbol: str, asof: str | None = None) -> dict:
+    """PIT 校准；asof 给定时只用 ≤ asof 的样本与收盘（回放不读未来）。"""
     c = conn()
-    d = latest_date(c, symbol)
+    d = latest_date(c, symbol, asof) if asof is not None else latest_date(c, symbol)
     c.close()
     return _pit_cached(symbol, d or "")
 
@@ -686,6 +706,11 @@ def _close_on(c, symbol: str, date: str) -> float | None:
     r = c.execute("SELECT underlying_close FROM raw_chain WHERE date=? AND symbol=? LIMIT 1",
                   (date, symbol)).fetchone()
     return float(r[0]) if r and r[0] is not None else None
+
+
+def pinned_distribution(c, symbol: str, date: str) -> dict | None:
+    """某 RND 日的 pinned 分布（止盈止损曲线与 Q05/Q25/Q75/Q95 失效线共用同一条）。"""
+    return _exit_dist(c, symbol, date)
 
 
 def _exit_dist(c, symbol: str, date: str) -> dict | None:
