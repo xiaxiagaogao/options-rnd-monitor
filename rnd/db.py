@@ -103,6 +103,27 @@ CREATE TABLE IF NOT EXISTS holding_identity (
   prev_identity TEXT,            -- 改动前身份；首次登记为 NULL
   changed_at    TEXT NOT NULL    -- 改动时刻，ISO8601 带服务器时区偏移
 );
+
+-- 自选清单（watchlist spec，2026-11-07）：RND 池的唯一来源。当前状态表，可改；
+-- 角色不在这里（= holding_identity 最新一行）；改动流水记 watchlist_events。
+CREATE TABLE IF NOT EXISTS watchlist (
+  ticker     TEXT PRIMARY KEY,
+  binance    TEXT NOT NULL,          -- 币安合约名，默认 ticker 去掉 "." 加 USDT
+  stage      TEXT NOT NULL CHECK (stage IN ('queued','checking','rejected','backfilling','ready','error')),
+  reason     TEXT,                   -- rejected / error 的原因白话
+  check_json TEXT,                   -- 最近一次准入检查的指标（面板展示）
+  added_at   TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- 清单改动流水（只追加）：add / remove / role / binance / stage。
+CREATE TABLE IF NOT EXISTS watchlist_events (
+  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticker   TEXT NOT NULL,
+  action   TEXT NOT NULL CHECK (action IN ('add','remove','role','binance','stage')),
+  detail   TEXT,                     -- JSON
+  at       TEXT NOT NULL             -- ISO8601 带服务器时区偏移
+);
 """
 
 # 派生层可全量重算，加列走轻量迁移即可

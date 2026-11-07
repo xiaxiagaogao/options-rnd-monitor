@@ -39,7 +39,7 @@ pool.write_pool(["SPY", "QQQ"], ["AAPL", "MU"], ["NVDA"], yml)
 p2 = pool.read_pool(yml)
 check("write_pool 回读 holdings", p2["holdings"] == ["AAPL", "MU"], f"{p2['holdings']}")
 
-eff = pool.effective_symbols(yml)
+eff = pool.yaml_symbols(yml)
 check("effective 去重并集", set(eff) == {"SPY", "QQQ", "AAPL", "MU", "NVDA"}, f"{eff}")
 check("effective 无重复", len(eff) == len(set(eff)), f"{eff}")
 
