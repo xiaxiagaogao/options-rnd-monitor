@@ -117,26 +117,12 @@ def test_backfill_per_symbol_isolation():
     check("BADSYM 未混入成功列表", "BADSYM" not in processed, f"processed={processed}")
 
 
-# ---------- B1: eod_update 串行派发一个进程 ----------
-def test_backfill_dispatch_serial():
-    print("\n[B1] eod_update 一次派发一个 backfill 进程（串行，非并发）")
-    import eod_update
-    popen_calls = []
-
-    class FakePopen:
-        def __init__(self, args, **kw):
-            popen_calls.append(args)
-
-    with mock.patch("subprocess.Popen", FakePopen):
-        eod_update._spawn_backfill(["GOOGL", "INTC", "MU", "SNDK"])
-    check("只 spawn 1 个进程（而非 4 个并发）", len(popen_calls) == 1, f"进程数={len(popen_calls)}")
-    args = popen_calls[0] if popen_calls else []
-    joined = ",".join(["GOOGL", "INTC", "MU", "SNDK"])
-    check("该进程 --symbols 含全部 4 个标的", joined in args, f"args={args}")
+# B1（eod_update 串行派发持仓回填）已随自选清单下线：新标的回填改由
+# rnd/watchlist_worker.py 在 ThetaData 锁内串行执行，见 tests/test_watchlist_worker.py。
 
 
 for fn in (test_chunked_skips_nodata, test_with_retry_no_retry_on_nodata,
-           test_backfill_per_symbol_isolation, test_backfill_dispatch_serial):
+           test_backfill_per_symbol_isolation):
     fn()
 
 print()

@@ -25,43 +25,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backfill import DTE_MAX, DTE_MIN, compute_symbol, with_retry  # 复用计算循环与重试
 
 
-def _spawn_backfill(symbols: list[str]):
-    """一个后台进程串行回填所有新标的。ThetaData 免费档单终端会话，绝不能多进程
-    并发拉（会 Invalid session ID 崩）。故：①一次 spawn 一个进程、内部串行遍历；
-    ②由调用方放在 eod_update 增量之后 spawn——此时主进程即将退出、ThetaData 空闲，
-    backfill 独占，不与增量抢会话。"""
-    import subprocess
-    root = Path(__file__).resolve().parent.parent
-    log = root / "output" / f"backfill_holdings_{dt.date.today().isoformat()}.log"
-    log.parent.mkdir(exist_ok=True)
-    with open(log, "ab") as fh:
-        subprocess.Popen(
-            [sys.executable, str(root / "scripts" / "backfill.py"),
-             "--symbols", ",".join(symbols), "--years", "3"],
-            stdout=fh, stderr=subprocess.STDOUT, cwd=root, start_new_session=True)
-    print(f"    回填派发（串行）: {', '.join(symbols)}（后台，日志 {log.name}）")
-
-
-def _notify_holdings(res: dict):
-    # 仅在有新纳入或闸门出错时推送（避免每日重复告警持有的黑名单标的）
-    if not (res.get("added") or res.get("gate_errors")):
-        return
-    from rnd import telegram
-    from rnd.holdings_sync import SYMBOL_BLACKLIST
-    lines = []
-    if res.get("added"):
-        lines.append("新纳入标的（持仓同步）: " + ", ".join(res["added"]))
-    if res.get("gate_errors"):
-        lines.append("闸门检查出错（下次重试）: " + ", ".join(res["gate_errors"]))
-    if res.get("excluded"):
-        parts = [f"{s}（{SYMBOL_BLACKLIST.get(s, '未映射')}）" for s in res["excluded"]]
-        lines.append("持仓中未纳入: " + ", ".join(parts))
-    try:
-        telegram.send("【持仓同步】\n" + "\n".join(lines))
-    except telegram.TelegramNotConfigured:
-        pass
-
-
 REFILL_WAIT_MIN = 25   # 当次补拉间隔（分钟）
 REFILL_TRIES = 3       # 补拉次数上限。总窗口 ≤ 75 分钟是硬约束：market-agent 07:40 SGT
                        # 读 RND 读数（夏令时补拉最晚约 23:15 UTC 收尾），拉长须同步挪它的 cron。
@@ -228,37 +191,45 @@ def should_push(res: dict) -> bool:
 
 
 def main():
+    """整个运行期间持 ThetaData 锁（与自选清单 worker 的准入 / 回填互斥）；结束后若清单还有
+    待处理条目（准入 / 回填排队或上次出错），起一个 worker 接着做。"""
+    from rnd.thetalock import thetadata_lock
+    try:
+        with thetadata_lock(blocking=False):
+            _run()
+    except BlockingIOError:
+        print("ThetaData 锁被占用（自选清单 worker 在准入 / 回填），等它结束 …", flush=True)
+        with thetadata_lock():
+            _run()
+    _spawn_watchlist_worker()
+
+
+def _spawn_watchlist_worker():
+    from rnd import watchlist, watchlist_worker
+    try:
+        conn = db.get_conn()
+        try:
+            pending = watchlist.pending_jobs(conn)
+        finally:
+            conn.close()
+        if pending:
+            watchlist_worker.spawn()
+            print(f"自选清单: 待处理 {pending}，已起 worker（日志 output/watchlist_worker.log）")
+    except Exception as e:  # noqa: BLE001
+        print(f"自选清单: worker 派发失败（{type(e).__name__}: {e}）")
+
+
+def _run():
     # 增量窗口的"今天"取美东（VPS 在 +08，本机日期是美东的明天 → ThetaData 拒收未来
-    # end_date，2026-09-01 事故根因）。回填日志文件名仍用本机日期，无关口径。
+    # end_date，2026-09-01 事故根因）。
     today = fetch.market_today()
     conn = db.get_conn()
-
-    # 持仓同步（holdings-sync）：先跑，用最新持仓驱动池。失败不阻断数据。
-    # sync/backfill 派发/notify 三段独立兜底：sync 成功后，backfill 或 notify 出错
-    # 不可误报"sync 失败"（否则明天不再把该标的当 added，永久卡在 MAX(date) IS NULL）。
-    from rnd import holdings_sync
     from server import pool
-    added_syms: list[str] = []   # 新纳入标的，回填延到增量之后串行派发（见文末，避免抢 ThetaData 会话）
-    try:
-        res = holdings_sync.sync(conn)
-    except Exception as e:  # noqa: BLE001
-        print(f"持仓同步: sync 失败但不影响数据（{type(e).__name__}: {e}）")
-        res = None
-    if res is not None:
-        if "skipped" in res:
-            print(f"持仓同步: {res['skipped']}")
-        else:
-            print(f"持仓同步: +{res['added']} -{res['removed']} pin={res['pinned']} "
-                  f"拒={res['rejected']} 排除={res['excluded']} 错={res.get('gate_errors', [])}")
-            added_syms = res.get("added", [])
-            try:
-                _notify_holdings(res)
-            except Exception as e:  # noqa: BLE001
-                print(f"  持仓同步告警失败（{type(e).__name__}: {e}）")
 
+    # 池 = 自选清单里 ready 的标的（watchlist spec，2026-11-07）。持仓同步不再改池，
+    # 新标的的准入与回填由自选清单 worker 负责，这里不再派发回填。
     # 更新对象 = 有效池（argv 显式指定时仍尊重）；但**只更新已有数据的标的**——
-    # 新 added 标的当天还在后台 backfill、raw_chain 无数据，MAX(date) 为 None，
-    # 必须排除出增量循环（否则 dt.date.fromisoformat(None) 崩）。
+    # 无 raw_chain 的标的 MAX(date) 为 None，必须排除出增量循环（否则 fromisoformat(None) 崩）。
     if len(sys.argv) > 1:
         requested = [s.strip() for s in sys.argv[1].split(",")]
     else:
@@ -266,12 +237,10 @@ def main():
     symbols = [s for s in requested if _latest(conn, s) is not None]
     skipped_new = [s for s in requested if s not in symbols]
     if skipped_new:
-        print(f"  本次跳过（无数据，backfill 中）: {skipped_new}")
+        print(f"  本次跳过（无数据）: {skipped_new}")
     if not symbols:
         print("无已落库标的可增量更新。")
         conn.close()
-        if added_syms:   # 仍要回填新标的（此路径无增量、ThetaData 空闲）
-            _spawn_backfill(added_syms)
         return
 
     lo = min(dt.date.fromisoformat(_latest(conn, s)) for s in symbols)
@@ -299,13 +268,6 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"推送: 失败但不影响数据（{type(e).__name__}: {e}）")
 
-    # 新标的串行回填：放在增量+推送之后 spawn——此时主进程即将退出、ThetaData 空闲，
-    # backfill 独占单会话，不与增量并发抢连接（否则 Invalid session ID 崩）。
-    if added_syms:
-        try:
-            _spawn_backfill(added_syms)
-        except Exception as e:  # noqa: BLE001
-            print(f"  回填派发失败（{type(e).__name__}: {e}）")
     print("完成。")
 
 

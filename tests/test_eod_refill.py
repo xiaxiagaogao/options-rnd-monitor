@@ -283,7 +283,6 @@ def _main(theta, conn, session, on_sleep=None, events=None):
     out = io.StringIO()
     with _env(theta, session=session, on_sleep=sleep_cb), \
          mock.patch.object(sys, "argv", ["eod_update.py"]), \
-         mock.patch("rnd.holdings_sync.sync", return_value={"skipped": "test"}), \
          mock.patch("server.pool.effective_symbols", return_value=["SPY", "QQQ"]), \
          mock.patch.object(eod_update.db, "get_conn", return_value=_NoClose(conn)), \
          mock.patch.object(fetch, "fetch_sofr_series", return_value=SOFR), \
@@ -311,11 +310,33 @@ def test_main_pushes_after_refill():
     check("日志说明休市不推", "休市" in log, f"log={log!r}")
 
 
+
+def test_main_spawns_watchlist_worker():
+    print("\n[W1] main：持 ThetaData 锁跑完后，清单有待处理条目才起 worker；不再调持仓同步")
+    from rnd import watchlist, watchlist_worker
+    theta = FakeTheta({"SPY": {REF}, "QQQ": {REF}})
+    conn = _conn(["SPY", "QQQ"])
+    with mock.patch.object(watchlist_worker, "spawn") as sp, \
+         mock.patch("rnd.holdings_sync.sync", side_effect=AssertionError("不应再调持仓同步")) as hs:
+        _main(theta, conn, OPEN)
+        check("清单无待处理 → 不起 worker", sp.call_count == 0, f"calls={sp.call_count}")
+        watchlist.add(conn, "AMD", "speculative")
+        _main(theta, conn, OPEN)
+        check("清单有 queued → 起 worker", sp.call_count == 1, f"calls={sp.call_count}")
+        check("全程没调持仓同步", hs.call_count == 0)
+    from rnd.thetalock import thetadata_lock
+    try:
+        with thetadata_lock(blocking=False):
+            free = True
+    except BlockingIOError:
+        free = False
+    check("main 结束后锁已释放", free)
+
 for fn in (test_partial_unpublished_goes_to_refill, test_holiday_all_empty_no_refill,
            test_all_empty_on_trading_day_refills_all, test_all_empty_before_close_no_refill,
            test_calendar_failure_fails_safe, test_refill_gives_up_after_max_tries,
            test_fetch_error_not_refilled, test_weekend_with_late_data_still_pushes,
-           test_main_pushes_after_refill):
+           test_main_pushes_after_refill, test_main_spawns_watchlist_worker):
     try:
         fn()
     except Exception as e:  # noqa: BLE001  一项崩不挡其它项
