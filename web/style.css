@@ -316,3 +316,43 @@ body {
 .id-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0 2px; }
 .trio.dim .tname, .trio.dim .tval { color: #8B877C; }
 .trio.dim .tval { font-weight: 600; }
+
+/* ---- 自选清单（watchlist spec 2026-11-07）：沿用现有色板与 chip / card / annot 语汇 ---- */
+.lamp.wait { background: #B0783A; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.adm-input:focus-visible, .wl-bn:focus-visible { border-color: #2F6B8F; box-shadow: 0 0 0 2px rgba(47,107,143,.18); }
+.adm-input:disabled, .wl-bn:disabled { background: #F4F2EE; color: #8B877C; }
+.adm-input::placeholder { color: #B3AFA4; text-transform: none; }
+.wl-add { display: grid; grid-template-columns: 150px auto minmax(170px, 220px) auto; gap: 14px;
+  align-items: end; justify-content: start; }
+.wl-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.wl-field .adm-input { flex: none; padding: 6px 9px; }
+.wl-field .chips { min-height: 29px; align-items: center; }
+.wl-submit { padding: 7px 16px; border: none; border-radius: 4px; background: #26241F; color: #FFF;
+  font-size: 13px; cursor: pointer; white-space: nowrap; }
+.wl-submit:hover:not(:disabled) { background: #3A3731; }
+.wl-submit:disabled { background: #C9C5BB; cursor: default; }
+.wl-submit:focus-visible { outline: 2px solid #2F6B8F; outline-offset: 2px; }
+.wl-missing { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px;
+  padding-top: 10px; border-top: 1px dashed #E4E1D9; }
+.wl-err { margin-top: 10px; font-size: 12px; color: #A33B2E; }
+.wl-empty { font-size: 13px; color: #6E6A60; line-height: 1.7; padding: 14px 2px; }
+.wl-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.wl-table th { text-align: left; font-size: 11px; font-weight: 500; color: #8B877C;
+  padding: 0 10px 6px 0; border-bottom: 1px solid #E4E1D9; white-space: nowrap; }
+.wl-table td { padding: 8px 10px 8px 0; border-bottom: 1px dashed #E4E1D9; vertical-align: top; }
+.wl-table tr:last-child td { border-bottom: none; }
+.wl-table .num { font-variant-numeric: tabular-nums; color: #6E6A60; white-space: nowrap; }
+.wl-table tr.busy { cursor: progress; }
+.wl-tk { font-weight: 700; font-size: 14px; white-space: nowrap; padding-top: 10px !important; }
+.wl-bn { width: 128px; padding: 4px 7px; border: 1px solid transparent; border-radius: 4px; font-size: 12px;
+  font-variant-numeric: tabular-nums; color: #26241F; background: transparent; text-transform: uppercase; outline: none; }
+.wl-bn:hover:not(:disabled) { border-color: #DDDAD2; }
+.wl-bn:focus { border-color: #C9C5BB; background: #FFF; }
+.wl-st { min-width: 220px; }
+.wl-status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; padding-top: 3px; }
+.wl-reason { font-size: 11px; color: #6E6A60; line-height: 1.6; margin-top: 3px; max-width: 360px; }
+.wl-reason .chip { margin-left: 6px; padding: 1px 8px; font-size: 11px; }
+.wl-act { text-align: right; width: 1%; }
+.wl-guide p { margin: 0 0 8px; font-size: 12px; color: #6E6A60; line-height: 1.65; }
+.wl-guide p:last-child { margin-bottom: 0; }

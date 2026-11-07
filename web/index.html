@@ -55,6 +55,10 @@
             <span class="side-nav-title">止盈止损</span>
             <span class="side-nav-sub">{{ view==='exits' && exitActive ? exitActive + ' · 价位 → 概率' : '价位 → 概率' }}</span>
           </button>
+          <button type="button" class="side-nav-item" :class="{ on: view==='watchlist' }" @click="goWatchlist">
+            <span class="side-nav-title">自选清单</span>
+            <span class="side-nav-sub">{{ wl.loaded ? wlCounts.active + ' 只入池' + (wlCounts.pending ? ' · ' + wlCounts.pending + ' 处理中' : '') : '决定拉哪些标的' }}</span>
+          </button>
           <button type="button" class="side-nav-item" :class="{ on: view==='assistant' }" @click="goAssistant">
             <span class="side-nav-title">✳ 研究助手</span>
             <span class="side-nav-sub">问答 · 展望</span>
@@ -103,44 +107,19 @@
             </div>
             <div class="annot">{{ o.ready ? (o.extremes.length ? '有极端分位 · 点开看' : '无极端分位 · 平静') : '数据未就绪' }}</div>
           </div>
-        <div class="card">
-          <div class="row card-head"><span class="card-title">添加标的</span>
-            <span class="annot">持仓标的 {{ poolStatus.count ?? '—' }}</span></div>
-          <div class="fx gap6" style="display:flex">
-            <input v-model="admSymbol" placeholder="代码，如 AMD" class="adm-input"
-                   @keyup.enter="runAdmission" />
-            <button class="chip" @click="runAdmission" :disabled="admBusy">
-              {{ admBusy ? '体检中…' : '准入检查' }}</button>
-          </div>
-          <div v-if="admResult" style="margin-top:8px">
-            <template v-if="admResult.ok">
-              <div class="row">
-                <span class="card-title">{{ admResult.symbol }}</span>
-                <span class="badge" :class="admResult.verdict ? '' : 'warn'"
-                      style="font-weight:700">{{ admResult.verdict ? 'PASS' : 'FAIL' }}</span>
-              </div>
-              <div class="qrow"><span class="muted">ATM 点差中位</span>
-                <span class="qv" :style="{color: admResult.checks.atm_spread_ok ? '#3E7A52':'#A33B2E'}">
-                  {{ (admResult.metrics.atm_spread_med*100).toFixed(2) }}% / ≤3%</span></div>
-              <div class="qrow"><span class="muted">±20% 双边行权价</span>
-                <span class="qv" :style="{color: admResult.checks.coverage_ok ? '#3E7A52':'#A33B2E'}">
-                  {{ admResult.metrics.n_two_sided_strikes }} / ≥15</span></div>
-              <div class="annot" style="margin-top:4px">
-                参照：<span v-for="p in admPool" :key="p.symbol">{{ p.symbol }}
-                {{ (p.atm_spread_med*100).toFixed(1) }}%·{{ p.n_two_sided_strikes }}　</span></div>
-              <button v-if="admResult.verdict" class="btn" style="width:100%;margin-top:8px;padding:8px;border:none;border-radius:4px;background:#26241F;color:#FFF;cursor:pointer"
-                      @click="poolAdd" :disabled="admBusy">换入并回填 3 年（后台约 1–3 小时）</button>
-            </template>
-            <div v-else class="login-err">{{ admResult.error }}</div>
-          </div>
-          <div v-for="d in poolStatus.holdings" :key="d.symbol" class="qrow">
-            <span class="muted">{{ d.symbol }}</span>
-            <span style="font-size:11px">{{ d.running ? (d.progress || '回填中…')
-              : (d.progress==='完成' || d.latest ? '就绪 · ' + (d.latest||'') : '等待回填') }}</span>
-          </div>
-          <div class="login-err" v-if="admErr">{{ admErr }}</div>
-        </div>
 
+        </template>
+
+        <!-- 上下文：自选清单 -->
+        <template v-if="view==='watchlist'">
+          <div class="zone-tag">清单怎么用</div>
+          <div class="card wl-guide">
+            <p>清单决定 RND 每天为哪些标的拉期权链。持仓变化不会改动清单。</p>
+            <p>加入后自动做准入检查<template v-if="wl.thresholds">（平值点差 ≤ {{ Math.round(wl.thresholds.max_atm_spread*100) }}%，±20% 内双边行权价 ≥ {{ wl.thresholds.min_two_sided }} 个）</template>，通过后回填 3 年历史，约 25–30 分钟，和每天早上的更新排队进行。</p>
+            <p>角色决定失效线：指数、信念看 Q05，投机看 Q25（空头为 Q95 / Q75）。改角色会留下记录。</p>
+            <p>pi-tradpod 只把「已入池」的标的当作交易名单。</p>
+            <p>移除只是停止更新：历史数据保留，加回来就恢复。</p>
+          </div>
         </template>
 
         <!-- 上下文：止盈止损 -->
@@ -370,7 +349,7 @@
                   </div>
                   <div class="id-row">
                     <span class="annot">身份</span>
-                    <button v-for="l in beLines" :key="l.identity" class="chip"
+                    <button v-for="l in beRoleOptions" :key="l.identity" class="chip"
                             :class="{on: binanceEntry.identity === l.identity}" :disabled="identityBusy"
                             :aria-pressed="binanceEntry.identity === l.identity"
                             @click="setIdentity(l.identity)">{{ l.label }} · {{ l.q.toUpperCase() }}</button>
@@ -651,6 +630,80 @@
         </main>
 
         <!-- ===== 研究助手 ===== -->
+        <!-- ===== 自选清单（watchlist spec 2026-11-07）：池的唯一来源 ===== -->
+        <main v-if="view==='watchlist'" class="main">
+          <div class="card">
+            <div class="row card-head"><span class="card-title">加入标的</span></div>
+            <form class="wl-add" @submit.prevent="wlAdd">
+              <label class="wl-field"><span class="annot">代码</span>
+                <input v-model="wlForm.ticker" class="adm-input" placeholder="如 AMD" maxlength="10"
+                       autocomplete="off" spellcheck="false" :disabled="wlBusy" /></label>
+              <div class="wl-field"><span class="annot">角色</span>
+                <div class="chips" role="group" aria-label="角色">
+                  <button type="button" v-for="r in wlRoleOptions(wlForm.ticker)" :key="r.key" class="chip"
+                          :class="{ on: wlForm.role === r.key }" :aria-pressed="wlForm.role === r.key"
+                          :disabled="wlBusy" @click="wlForm.role = r.key">{{ r.label }} · {{ r.q }}</button>
+                </div></div>
+              <label class="wl-field wl-field-bn"><span class="annot">币安合约（不填用默认）</span>
+                <input v-model="wlForm.binance" class="adm-input" maxlength="24" autocomplete="off"
+                       spellcheck="false" :placeholder="wlDefaultBinance(wlForm.ticker) || 'AMDUSDT'"
+                       :disabled="wlBusy" /></label>
+              <button type="submit" class="wl-submit" :disabled="wlBusy || !wlForm.ticker.trim()">
+                {{ wlBusy ? '加入中…' : '加入清单' }}</button>
+            </form>
+            <div v-if="wl.holdings_missing && wl.holdings_missing.length" class="wl-missing">
+              <span class="annot">持仓里有、清单里没有：</span>
+              <button type="button" v-for="t in wl.holdings_missing" :key="'m-'+t" class="chip ghost"
+                      @click="wlPick(t)">{{ t }}</button>
+              <span class="annot">点一下填进上面的代码</span>
+            </div>
+            <div v-if="wlErr" class="wl-err" role="alert">{{ wlErr }}</div>
+          </div>
+
+          <div class="card">
+            <div class="row card-head">
+              <span class="card-title">清单 · {{ wl.entries.length }} 只</span>
+              <span class="annot" v-if="wlCounts.pending">{{ wlCounts.pending }} 只在处理，页面每 15 秒刷新一次</span>
+            </div>
+            <div v-if="!wl.loaded" class="annot">正在读取清单…</div>
+            <div v-else-if="!wl.entries.length" class="wl-empty">
+              清单是空的，RND 现在不会为任何标的拉数据。在上面输入代码加入第一个标的，SPY、QQQ 一般设为「指数」。</div>
+            <table v-else class="wl-table">
+              <thead><tr>
+                <th>代码</th><th>角色</th><th>币安合约</th><th>状态</th>
+                <th class="num">数据至</th><th class="num">加入</th><th><span class="sr-only">操作</span></th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="e in wl.entries" :key="e.ticker" :class="{ busy: wlRowBusy[e.ticker] }">
+                  <td class="wl-tk">{{ e.ticker }}</td>
+                  <td>
+                    <div class="chips" role="group" :aria-label="e.ticker + ' 角色'">
+                      <button type="button" v-for="r in wlRoleOptions(e.ticker)" :key="r.key" class="chip"
+                              :class="{ on: e.role === r.key }" :aria-pressed="e.role === r.key"
+                              :disabled="!!wlRowBusy[e.ticker]" @click="wlSetRole(e, r.key)">{{ r.label }}</button>
+                    </div>
+                  </td>
+                  <td>
+                    <input class="wl-bn" v-model="wlDraft[e.ticker]" maxlength="24" spellcheck="false"
+                           :aria-label="e.ticker + ' 币安合约'" :disabled="!!wlRowBusy[e.ticker]"
+                           @keyup.enter="$event.target.blur()" @blur="wlSaveBinance(e)" />
+                  </td>
+                  <td class="wl-st">
+                    <span class="wl-status"><span class="lamp" :class="wlLamp(e)"></span>{{ wlStatusText(e) }}</span>
+                    <div v-if="e.stage === 'rejected' || e.stage === 'error'" class="wl-reason">{{ e.reason }}
+                      <button type="button" class="chip ghost" :disabled="!!wlRowBusy[e.ticker]"
+                              @click="wlRecheck(e)">重新检查</button></div>
+                  </td>
+                  <td class="num">{{ e.data_latest || '—' }}</td>
+                  <td class="num">{{ e.added_at.slice(0, 10) }}</td>
+                  <td class="wl-act"><button type="button" class="chip ghost" :disabled="!!wlRowBusy[e.ticker]"
+                              @click="wlRemove(e)">移除</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </main>
+
         <main v-if="view==='assistant'" class="main asst-main">
     <div class="asst-wrap">
       <div class="card outlook-card">

@@ -92,8 +92,10 @@ createApp({
     densityData: { ok: false }, heatData: null,
     dcdfData: { ok: false }, pitData: { ok: false },
     switchSeq: 0, loadingSym: false, uiFading: false,
-    admSymbol: "", admBusy: false, admResult: null, admPool: [], admErr: "",
-    poolStatus: { holdings: [], count: 0 }, poolTimer: null,
+    // 自选清单（watchlist spec 2026-11-07）：池的唯一来源
+    wl: { loaded: false, entries: [], holdings_missing: [], index_tickers: ["SPY", "QQQ"], thresholds: null },
+    wlForm: { ticker: "", role: "conviction", binance: "" },
+    wlBusy: false, wlErr: "", wlRowBusy: {}, wlDraft: {}, wlSaved: {}, wlTimer: null,
     cmpMode: "prev", cmpLabel: "",
     diagMeta: null,
     form: { direction: "long", identity: "speculative", entry_price: "", risk_budget: "",
@@ -113,7 +115,12 @@ createApp({
               "和指数并排有什么异常？", "今天闸门/拟合质量可信吗？"],
   }),
   computed: {
-    isApp() { return ["today", "symbol", "exits", "assistant"].includes(this.view); },
+    isApp() { return ["today", "symbol", "exits", "watchlist", "assistant"].includes(this.view); },
+    wlCounts() {
+      const c = { active: 0, pending: 0, rejected: 0 };
+      for (const e of this.wl.entries) c[e.status] = (c[e.status] || 0) + 1;
+      return c;
+    },
     dataDate() {
       if (this.detail && this.detail.date) return this.detail.date;
       const r = this.overview.find(o => o.ready && o.date);
@@ -154,8 +161,19 @@ createApp({
       const be = this.binanceEntry, k = this.beLampQ;
       if (!be || !k) return "";
       const verb = be.qty < 0 ? "升破" : "跌破";
-      const tag = be.stop_q ? `（${be.identity === "conviction" ? "信念" : "投机"}线）` : "";
+      const tag = be.stop_q ? `（${this.wlRoleLabel(be.identity)}线）` : "";
       return this.beBreached ? `已${verb}入场日 ${k.toUpperCase()}${tag}` : `未${verb} ${k.toUpperCase()}${tag}`;
+    },
+    // 身份选项 = 两条候选线 + SPY / QQQ 的「指数」（失效线同信念，watchlist spec §2）
+    // 顺序与自选清单页一致：指数（仅 SPY / QQQ）→ 信念 → 投机
+    beRoleOptions() {
+      const lines = this.beLines;
+      if (!lines.length) return [];
+      const conv = lines.find(l => l.identity === "conviction");
+      const spec = lines.find(l => l.identity === "speculative");
+      const idx = this.wl.index_tickers.includes(this.detail.symbol)
+        ? [{ identity: "index", label: "指数", q: conv.q }] : [];
+      return [...idx, conv, spec];
     },
     // 两条候选失效线（holding-identity spec §4）：多头 投机 Q25 / 信念 Q05，空头镜像 Q75 / Q95
     beLines() {
@@ -224,6 +242,15 @@ createApp({
       return o && o.ready ? o.date : null;
     },
   },
+  watch: {
+    // 加入表单：代码改成 SPY / QQQ 以外时，「指数」选项消失，角色回到信念
+    "wlForm.ticker"(t) {
+      const u = (t || "").trim().toUpperCase();
+      if (this.wlForm.role === "index" && !this.wl.index_tickers.includes(u)) this.wlForm.role = "conviction";
+    },
+    // 离开清单页就停掉 15 秒轮询
+    view(v) { if (v !== "watchlist") clearTimeout(this.wlTimer); },
+  },
   methods: {
     fmt(v, n = 2) { return v == null ? "—" : Number(v).toFixed(n); },
     // 今日页持仓灯的说明：写明判的是哪天收盘（RND 停更的标的，收盘日晚于其数据日）。
@@ -247,6 +274,7 @@ createApp({
     // ---------- 侧栏三入口：今日 / 标的 / 助手 ----------
     pathFor(view, sym) {
       if (view === "assistant") return "/assistant";
+      if (view === "watchlist") return "/watchlist";
       if (view === "exits") return sym ? `/exits/${encodeURIComponent(sym)}` : "/exits";
       if (view === "symbol") return `/sym/${encodeURIComponent(sym || this.active || "SPY")}`;
       return "/";
@@ -309,6 +337,13 @@ createApp({
       if (target && (target !== this.exitActive || !this.exitData)) await this.switchExit(target);
       else this.$nextTick(() => Object.values(this.charts).forEach(c => c && c.resize()));
     },
+    goWatchlist() {
+      return this.withPaneTransition(async () => {
+        if (this.view !== "watchlist") history.pushState({ view: "watchlist" }, "", "/watchlist");
+        this.view = "watchlist";
+        await this.loadWatchlist();
+      }, { animate: this.view !== "watchlist" });
+    },
     goAssistant() {
       this.asSymbol = this.active || this.asSymbol;
       return this.withPaneTransition(async () => {
@@ -322,6 +357,11 @@ createApp({
     async routeFromLocation() {
       // 首屏 / 浏览器前进后退：瞬时切换，不叠过渡
       const path = location.pathname || "/";
+      if (path.startsWith("/watchlist")) {
+        this.view = "watchlist";
+        await this.loadWatchlist();
+        return;
+      }
       if (path.startsWith("/assistant")) {
         this.asSymbol = this.active || this.asSymbol;
         this.view = "assistant";
@@ -430,7 +470,7 @@ createApp({
         const ready = ov.symbols.find(o => o.ready);
         this.active = (ready ? ready.symbol : this.symbols[0]) || "SPY";
         this.events = (await api("/api/events")).events.slice(0, 12);
-        this.refreshPool();
+        this.loadWatchlist();
         // 按 URL 分流：/ → 今日总览；/sym/:code → 深页；/assistant → 助手
         await this.routeFromLocation();
       } catch (e) {
@@ -1006,41 +1046,127 @@ createApp({
       return ch;
     },
     // ---------- 准入与池管理 ----------
-    async runAdmission() {
-      if (!this.admSymbol.trim()) return;
-      this.admBusy = true; this.admErr = ""; this.admResult = null;
-      try {
-        const r = await api(`/api/admission/${this.admSymbol.trim().toUpperCase()}`);
-        this.admResult = r.candidate;
-        this.admPool = r.pool;
-      } catch (e) { this.admErr = e.detail || "检查失败"; }
-      this.admBusy = false;
+    // ---------- 自选清单 ----------
+    wlDefaultBinance(t) {
+      const x = (t || "").trim().toUpperCase().replace(/[.\-]/g, "");
+      return x ? x + "USDT" : "";
     },
-    async poolAdd() {
-      this.admBusy = true; this.admErr = "";
+    // 角色选项：指数只对 SPY / QQQ 出现；失效线随多空，清单页按多头口径标注
+    wlRoleOptions(ticker) {
+      const t = (ticker || "").trim().toUpperCase();
+      const opts = [{ key: "conviction", label: "信念", q: "Q05" }, { key: "speculative", label: "投机", q: "Q25" }];
+      if (this.wl.index_tickers.includes(t)) opts.unshift({ key: "index", label: "指数", q: "Q05" });
+      return opts;
+    },
+    wlRoleLabel(role) { return { index: "指数", conviction: "信念", speculative: "投机" }[role] || "未定"; },
+    wlStatusText(e) {
+      if (e.status === "active") return "已入池";
+      if (e.stage === "rejected") return "准入未通过";
+      if (e.stage === "error") return "出错 · 下次自动重试";
+      if (e.stage === "backfilling") return "回填中" + (e.progress ? " · " + e.progress : "");
+      if (e.stage === "checking") return "准入检查中";
+      return "排队等检查";
+    },
+    wlLamp(e) {
+      if (e.status === "active") return "ok";
+      if (e.stage === "rejected") return "bad";
+      return "wait";
+    },
+    async loadWatchlist() {
+      clearTimeout(this.wlTimer);
       try {
-        const dyn = (this.poolStatus.holdings || []).map(d => d.symbol);
-        let replace = null;
-        if (dyn.length >= 2) {
-          replace = prompt(`持仓组已满，换出哪一个？（${dyn.join(" / ")}）\n换出不删数据，换回零成本`);
-          if (!replace) { this.admBusy = false; return; }
+        const before = new Set(this.wl.entries.filter(e => e.status === "active").map(e => e.ticker));
+        const r = await api("/api/watchlist/manage");
+        // 合约名草稿：用户正在改（与上次服务端值不同）的保留，其余跟服务端走
+        const draft = {}, saved = {};
+        for (const e of r.entries) {
+          const d = this.wlDraft[e.ticker];
+          const dirty = d != null && d !== this.wlSaved[e.ticker] && d.trim().toUpperCase() !== e.binance;
+          draft[e.ticker] = dirty ? this.wlDraft[e.ticker] : e.binance;
+          saved[e.ticker] = e.binance;
         }
-        const r = await api("/api/pool/add", { method: "POST",
-          body: JSON.stringify({ symbol: this.admResult.symbol, replace }) });
-        if (!r.ok) { this.admErr = r.error; this.admBusy = false; return; }
-        this.admResult = null; this.admSymbol = "";
-        await this.refreshPool();
-        this.overview = (await api("/api/overview")).symbols;
-        this.symbols = this.overview.map(o => o.symbol);
-      } catch (e) { this.admErr = e.detail || "换入失败"; }
-      this.admBusy = false;
+        this.wlDraft = draft;
+        this.wlSaved = saved;
+        this.wl = { ...r, loaded: true };
+        const after = r.entries.filter(e => e.status === "active").map(e => e.ticker);
+        if (before.size && (after.length !== before.size || after.some(t => !before.has(t)))) {
+          await this.refreshOverview();      // 池变了：侧栏快览 / 标的列表跟上
+        }
+        if (r.entries.some(e => e.status === "pending") && this.view === "watchlist") {
+          this.wlTimer = setTimeout(() => this.loadWatchlist(), 15000);
+        }
+      } catch (e) {
+        if (e.auth) { this.view = "login"; return; }
+        this.wlErr = e.detail || "清单加载失败";
+      }
     },
-    async refreshPool() {
-      this.poolStatus = await api("/api/pool/status");
-      const anyRunning = (this.poolStatus.holdings || []).some(d => d.running);
-      clearTimeout(this.poolTimer);
-      if (anyRunning) this.poolTimer = setTimeout(() => this.refreshPool(), 30000);
+    async refreshOverview() {
+      const ov = await api("/api/overview");
+      this.overview = ov.symbols;
+      this.holdings = ov.holdings || [];
+      this.holdingsOutOfPool = ov.holdings_out_of_pool || [];
+      this.symbols = ov.symbols.map(o => o.symbol);
     },
+    async wlCall(op, body) {
+      return api(`/api/watchlist/${op}`, { method: "POST", body: JSON.stringify(body) });
+    },
+    wlPick(t) {
+      this.wlForm.ticker = t;
+      this.wlErr = "";
+      if (this.wlForm.role === "index" && !this.wl.index_tickers.includes(t)) this.wlForm.role = "conviction";
+    },
+    async wlAdd() {
+      const ticker = this.wlForm.ticker.trim().toUpperCase();
+      if (!ticker || this.wlBusy) return;
+      this.wlBusy = true;
+      this.wlErr = "";
+      try {
+        await this.wlCall("add", { ticker, role: this.wlForm.role, binance: this.wlForm.binance.trim() || null });
+        this.wlForm = { ticker: "", role: "conviction", binance: "" };
+        await this.loadWatchlist();
+      } catch (e) {
+        if (e.auth) { this.view = "login"; return; }
+        this.wlErr = e.detail || "没加进去，请重试";
+      } finally {
+        this.wlBusy = false;
+      }
+    },
+    async wlRowOp(e, op, body, confirmText) {
+      if (this.wlRowBusy[e.ticker]) return;
+      if (confirmText && !confirm(confirmText)) return;
+      this.wlRowBusy = { ...this.wlRowBusy, [e.ticker]: true };
+      this.wlErr = "";
+      try {
+        await this.wlCall(op, { ticker: e.ticker, ...body });
+        await this.loadWatchlist();
+        if (op === "remove") await this.refreshOverview();
+      } catch (err) {
+        if (err.auth) { this.view = "login"; return; }
+        this.wlErr = `${e.ticker}：${err.detail || "操作失败，请重试"}`;
+      } finally {
+        const { [e.ticker]: _, ...rest } = this.wlRowBusy;
+        this.wlRowBusy = rest;
+      }
+    },
+    wlSetRole(e, role) {
+      if (e.role === role) return;
+      const from = this.wlRoleOptions(e.ticker).find(o => o.key === e.role);
+      const to = this.wlRoleOptions(e.ticker).find(o => o.key === role);
+      const line = from && from.q !== to.q ? `失效线由 ${from.q} 改为 ${to.q}` : `失效线仍是 ${to.q}`;
+      return this.wlRowOp(e, "update", { role },
+        `把 ${e.ticker} 从${this.wlRoleLabel(e.role)}改为${to.label}？${line}，改动会留记录。`);
+    },
+    wlSaveBinance(e) {
+      const v = (this.wlDraft[e.ticker] || "").trim().toUpperCase();
+      if (!v || v === e.binance) { this.wlDraft = { ...this.wlDraft, [e.ticker]: e.binance }; return; }
+      return this.wlRowOp(e, "update", { binance: v });
+    },
+    wlRemove(e) {
+      return this.wlRowOp(e, "remove", {},
+        `把 ${e.ticker} 移出清单？之后不再每天更新它的 RND（历史数据保留，加回来就恢复），` +
+        `pi-tradpod 也会把它移出交易名单。`);
+    },
+    wlRecheck(e) { return this.wlRowOp(e, "recheck", {}); },
     // ---------- 交易日志 ----------
     async openPosition() {
       this.journalErr = "";
@@ -1071,8 +1197,8 @@ createApp({
       const be = this.binanceEntry;
       if (!be || this.identityBusy || be.identity === identity) return;
       if (be.identity) {
-        const from = this.beLines.find(l => l.identity === be.identity);
-        const to = this.beLines.find(l => l.identity === identity);
+        const from = this.beRoleOptions.find(l => l.identity === be.identity);
+        const to = this.beRoleOptions.find(l => l.identity === identity);
         if (!confirm(`把 ${this.detail.symbol} 从${from.label}改为${to.label}？` +
                      `失效线将由 ${from.q.toUpperCase()} 改为 ${to.q.toUpperCase()}，改动会留记录。`)) return;
       }
