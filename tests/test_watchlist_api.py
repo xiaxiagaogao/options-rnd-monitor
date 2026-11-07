@@ -59,6 +59,14 @@ client = TestClient(api.app)
 check("前提：登录", client.post("/api/login", json={"password": "test-password"}).status_code == 200)
 check("登录 cookie 不能访问机器接口", client.get("/api/watchlist").status_code == 401)
 
+print("[未迁移保护]")
+r = client.post("/api/watchlist/add", json={"ticker": "AMD", "role": "speculative"})
+check("清单没初始化时拒绝写入（免得池突然只剩一个待检查标的）", r.status_code == 400 and "初始化" in r.text
+      and spawned == [], r.text[:160])
+c = db.get_conn(tmp)
+wl.add(c, "QQQ", "index", stage="ready", source="migration")   # 等价于跑过迁移
+c.close()
+
 print("[增删改]")
 r = client.post("/api/watchlist/add", json={"ticker": "nvda", "role": "conviction"})
 check("加入 → 200 + 起 worker", r.status_code == 200 and r.json()["entry"]["ticker"] == "NVDA"
@@ -107,10 +115,32 @@ check("NVDA active、无 reason", e["NVDA"]["status"] == "active" and e["NVDA"][
 check("SPY pending、reason 说明在等检查", e["SPY"]["status"] == "pending" and e["SPY"]["reason"], str(e["SPY"]))
 check("与 wl.payload 一致", p == wl.payload(db.get_conn(tmp)))
 
+print("[标的页改身份也推进 updated_at]")
+import time as _t   # noqa: E402
+_t.sleep(1.1)
+before = anon.get("/api/watchlist", headers=AUTH).json()
+q.get_symbols = lambda: ["QQQ", "NVDA"]
+r = client.post("/api/holdings/identity", json={"symbol": "NVDA", "identity": "conviction"})
+after = anon.get("/api/watchlist", headers=AUTH).json()
+check("持仓卡改身份 → version 与 updated_at 都变", r.status_code == 200 and after["version"] != before["version"]
+      and after["updated_at"] > before["updated_at"], f"{before['updated_at']} → {after['updated_at']}")
+c = db.get_conn(tmp)
+ev = c.execute("SELECT action, detail FROM watchlist_events ORDER BY event_id DESC LIMIT 1").fetchone()
+c.close()
+check("并补一条 role 流水", ev[0] == "role" and "symbol_card" in ev[1], str(ev))
+
+print("[spawn 失败不报 500]")
+def _boom():
+    raise OSError("output/ 不可写")
+watchlist_worker.spawn = _boom
+r = client.post("/api/watchlist/add", json={"ticker": "AMD", "role": "speculative"})
+check("已写入 → 200 带 warning", r.status_code == 200 and "warning" in r.json(), r.text[:160])
+watchlist_worker.spawn = lambda: spawned.append(1)
+
 print("[池 = ready；从没写过清单 → 退回 symbols.yaml]")
 _real_get_conn = db.get_conn
 with mock.patch.object(db, "get_conn", lambda *a, **k: _real_get_conn(tmp)):
-    check("effective_symbols 只含 ready", pool.effective_symbols() == ["NVDA"], str(pool.effective_symbols()))
+    check("effective_symbols 只含 ready（QQQ 排前）", pool.effective_symbols() == ["QQQ", "NVDA"], str(pool.effective_symbols()))
 fresh = Path(tempfile.mkdtemp()) / "fresh.sqlite"
 with mock.patch.object(db, "get_conn", lambda *a, **k: _real_get_conn(fresh)), \
         mock.patch.object(pool, "yaml_symbols", return_value=["SPY", "QQQ", "MU"]):

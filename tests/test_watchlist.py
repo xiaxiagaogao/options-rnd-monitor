@@ -111,12 +111,25 @@ with tempfile.TemporaryDirectory() as tmp:
     e = wl.add(conn, "AMD", "speculative", now=T[14])
     check("重新加入：身份相同不新增行", len(ident.history(conn, "AMD")) == 1 and e["stage"] == "queued")
 
+    print("[原子性 / 卡住条目]")
+    before_role = wl.entry(conn, "NVDA")["role"]
+    n_ident = len(ident.history(conn, "NVDA"))
+    err = raises(wl.update, conn, "NVDA", role="conviction", binance="bad/perp")
+    check("改角色 + 非法合约名 → 整体拒绝，角色不变、不新增身份行",
+          err is not None and wl.entry(conn, "NVDA")["role"] == before_role
+          and len(ident.history(conn, "NVDA")) == n_ident, f"err={err}")
+    wl.add(conn, "STK", "speculative", now=T[16])
+    wl.set_stage(conn, "STK", "backfilling", now=T[16])
+    check("卡在 backfilling 的条目算进 needs_worker（不算进 pending_jobs）",
+          "STK" in wl.needs_worker(conn) and "STK" not in wl.pending_jobs(conn))
+    wl.remove(conn, "STK", now=T[16])
+
     print("[对外 payload]")
     p1 = wl.payload(conn)
     check("entries 按 ticker 升序", [x["ticker"] for x in p1["entries"]] == sorted(x["ticker"] for x in p1["entries"]))
     check("字段齐全", set(p1["entries"][0]) == {"ticker", "role", "binance", "status", "reason",
                                                "added_at", "role_changed_at"}, str(sorted(p1["entries"][0])))
-    check("updated_at = 最新一条事件时间", p1["updated_at"] == T[14].isoformat(timespec="seconds"), p1["updated_at"])
+    check("updated_at = 最新一条事件时间", p1["updated_at"] == T[16].isoformat(timespec="seconds"), p1["updated_at"])
     check("version 是 64 位十六进制", len(p1["version"]) == 64)
     check("内容不变 → version 不变", wl.payload(conn)["version"] == p1["version"])
     wl.set_stage(conn, "AMD", "ready", now=T[15])

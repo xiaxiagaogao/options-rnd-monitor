@@ -96,6 +96,7 @@ createApp({
     wl: { loaded: false, entries: [], holdings_missing: [], index_tickers: ["SPY", "QQQ"], thresholds: null },
     wlForm: { ticker: "", role: "conviction", binance: "" },
     wlBusy: false, wlErr: "", wlRowBusy: {}, wlDraft: {}, wlSaved: {}, wlTimer: null,
+    wlSeq: 0, wlBnSaving: {},   // 清单请求序号（只认最新响应）；合约名保存中的 Promise
     cmpMode: "prev", cmpLabel: "",
     diagMeta: null,
     form: { direction: "long", identity: "speculative", entry_price: "", risk_budget: "",
@@ -1074,9 +1075,12 @@ createApp({
     },
     async loadWatchlist() {
       clearTimeout(this.wlTimer);
+      const seq = ++this.wlSeq;
       try {
         const before = new Set(this.wl.entries.filter(e => e.status === "active").map(e => e.ticker));
+        const wasLoaded = this.wl.loaded;
         const r = await api("/api/watchlist/manage");
+        if (seq !== this.wlSeq) return;      // 轮询的旧响应晚到：丢弃，别覆盖刚保存 / 移除后的新状态
         // 合约名草稿：用户正在改（与上次服务端值不同）的保留，其余跟服务端走
         const draft = {}, saved = {};
         for (const e of r.entries) {
@@ -1089,7 +1093,7 @@ createApp({
         this.wlSaved = saved;
         this.wl = { ...r, loaded: true };
         const after = r.entries.filter(e => e.status === "active").map(e => e.ticker);
-        if (before.size && (after.length !== before.size || after.some(t => !before.has(t)))) {
+        if (wasLoaded && (after.length !== before.size || after.some(t => !before.has(t)))) {
           await this.refreshOverview();      // 池变了：侧栏快览 / 标的列表跟上
         }
         if (r.entries.some(e => e.status === "pending") && this.view === "watchlist") {
@@ -1097,7 +1101,7 @@ createApp({
         }
       } catch (e) {
         if (e.auth) { this.view = "login"; return; }
-        this.wlErr = e.detail || "清单加载失败";
+        if (seq === this.wlSeq) this.wlErr = e.detail || "清单加载失败";
       }
     },
     async refreshOverview() {
@@ -1132,6 +1136,8 @@ createApp({
       }
     },
     async wlRowOp(e, op, body, confirmText) {
+      // 先等这一行正在保存的合约名（输入框失焦保存会先于按钮点击触发），别把这次点击吞掉
+      if (this.wlBnSaving[e.ticker]) await this.wlBnSaving[e.ticker];
       if (this.wlRowBusy[e.ticker]) return;
       if (confirmText && !confirm(confirmText)) return;
       this.wlRowBusy = { ...this.wlRowBusy, [e.ticker]: true };
@@ -1156,10 +1162,26 @@ createApp({
       return this.wlRowOp(e, "update", { role },
         `把 ${e.ticker} 从${this.wlRoleLabel(e.role)}改为${to.label}？${line}，改动会留记录。`);
     },
-    wlSaveBinance(e) {
+    // 合约名失焦保存：不占行互斥（wlRowBusy），而是挂一个 Promise，按钮操作会先等它
+    async wlSaveBinance(e) {
       const v = (this.wlDraft[e.ticker] || "").trim().toUpperCase();
       if (!v || v === e.binance) { this.wlDraft = { ...this.wlDraft, [e.ticker]: e.binance }; return; }
-      return this.wlRowOp(e, "update", { binance: v });
+      if (this.wlBnSaving[e.ticker]) return this.wlBnSaving[e.ticker];
+      const job = (async () => {
+        this.wlErr = "";
+        try {
+          await this.wlCall("update", { ticker: e.ticker, binance: v });
+          await this.loadWatchlist();
+        } catch (err) {
+          if (err.auth) { this.view = "login"; return; }
+          this.wlErr = `${e.ticker}：${err.detail || "合约名没保存成功，请重试"}`;
+        }
+      })();
+      this.wlBnSaving = { ...this.wlBnSaving, [e.ticker]: job };
+      try { await job; } finally {
+        const { [e.ticker]: _, ...rest } = this.wlBnSaving;
+        this.wlBnSaving = rest;
+      }
     },
     wlRemove(e) {
       return this.wlRowOp(e, "remove", {},

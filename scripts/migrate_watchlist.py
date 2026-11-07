@@ -39,8 +39,11 @@ def identity_needs_rebuild(conn) -> bool:
 
 
 def rebuild_identity(conn):
-    """放开 CHECK：建新表 → 原样拷贝（含 event_id）→ 删旧表 → 改名，单事务。"""
+    """放开 CHECK：建新表 → 原样拷贝（含 event_id）→ 删旧表 → 改名，单事务。
+    AUTOINCREMENT 高水位一并保留：被删过的最大 id 不能在新表里被重用。"""
     n_before = conn.execute("SELECT COUNT(*) FROM holding_identity").fetchone()[0]
+    row = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'holding_identity'").fetchone()
+    old_seq = row[0] if row else 0
     conn.commit()
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -53,6 +56,12 @@ def rebuild_identity(conn):
         n_after = conn.execute("SELECT COUNT(*) FROM holding_identity").fetchone()[0]
         if n_after != n_before:
             raise RuntimeError(f"重建后行数不符：{n_before} → {n_after}")
+        max_id = conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM holding_identity").fetchone()[0]
+        seq = max(old_seq, max_id)
+        if conn.execute("SELECT 1 FROM sqlite_sequence WHERE name = 'holding_identity'").fetchone():
+            conn.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'holding_identity'", (seq,))
+        elif seq:
+            conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('holding_identity', ?)", (seq,))
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -83,8 +92,15 @@ def apply(conn, yaml_path=None) -> dict:
         raise MigrationBlocked(f"这些标的没有身份，先定角色再迁移：{p['missing_role']}")
     if p["rebuild_identity"]:
         rebuild_identity(conn)
-    for s in p["seeds"]:
-        wl.add(conn, s["ticker"], s["role"], s["binance"], stage=s["stage"], source="migration")
+    # 播种整体一个事务：半途失败就全部回滚，下次重跑仍会完整播种（is_seeded 只看有没有流水）
+    try:
+        for s in p["seeds"]:
+            wl.add(conn, s["ticker"], s["role"], s["binance"], stage=s["stage"], source="migration",
+                   commit=False)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
     return p
 
 

@@ -79,8 +79,10 @@ def as_of(conn, symbol: str, asof: str) -> dict | None:
     return best
 
 
-def set_identity(conn, symbol: str, identity: str, *, now: dt.datetime | None = None) -> dict:
-    """登记 / 改动身份。与当前相同 → 不写行（changed=False）。非法身份 → ValueError。"""
+def set_identity(conn, symbol: str, identity: str, *, now: dt.datetime | None = None,
+                 commit: bool = True) -> dict:
+    """登记 / 改动身份。与当前相同 → 不写行（changed=False）。非法身份 → ValueError。
+    commit=False：由调用方在同一事务里统一提交（自选清单的加入 / 改角色）。"""
     if identity not in IDENTITIES:
         raise ValueError(f"身份只能是 {' / '.join(IDENTITIES)}，收到 {identity!r}")
     symbol = symbol.upper()
@@ -94,7 +96,8 @@ def set_identity(conn, symbol: str, identity: str, *, now: dt.datetime | None = 
     ts = (now or dt.datetime.now().astimezone()).isoformat(timespec="seconds")
     conn.execute("INSERT INTO holding_identity (symbol, identity, prev_identity, changed_at)"
                  " VALUES (?, ?, ?, ?)", (symbol, identity, prev, ts))
-    conn.commit()
+    if commit:
+        conn.commit()
     return {"symbol": symbol, "identity": identity, "prev_identity": prev,
             "changed_at": ts, "changed": True}
 

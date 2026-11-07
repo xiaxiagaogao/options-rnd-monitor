@@ -35,6 +35,6 @@ def thetadata_lock(path=None, *, blocking: bool = True, timeout: float | None = 
                         raise TimeoutError(f"等 ThetaData 锁超过 {timeout:.0f} 秒") from None
                     time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
         try:
-            yield
+            yield fh   # 交给子进程（pass_fds）可让锁随子进程存活，见 watchlist_worker
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)

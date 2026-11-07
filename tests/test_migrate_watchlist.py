@@ -110,6 +110,48 @@ with tempfile.TemporaryDirectory() as tmp:
           and conn.execute("SELECT COUNT(*) FROM watchlist_events").fetchone()[0] == n_events)
     conn.close()
 
+print("[高水位 / 播种原子性]")
+with tempfile.TemporaryDirectory() as tmp:
+    path, yml = Path(tmp) / "hw.sqlite", Path(tmp) / "symbols.yaml"
+    yml.write_text(YAML)
+    raw = sqlite3.connect(path)
+    raw.executescript(OLD_DDL)
+    raw.executemany("INSERT INTO holding_identity (symbol, identity, prev_identity, changed_at) VALUES (?,?,?,?)",
+                    [("QQQ", "conviction", None, "t1"), ("NVDA", "conviction", None, "t2"),
+                     ("MU", "conviction", None, "t3"), ("ZZZ", "speculative", None, "t4")])
+    raw.execute("DELETE FROM holding_identity WHERE symbol = 'ZZZ'")    # 删掉最大 id（4）
+    raw.commit()
+    raw.close()
+    conn = db.get_conn(path)
+    mig.rebuild_identity(conn)
+    conn.execute("INSERT INTO holding_identity (symbol, identity, changed_at) VALUES ('X', 'speculative', 't5')")
+    nid = conn.execute("SELECT MAX(event_id) FROM holding_identity").fetchone()[0]
+    check("删掉的最大 id 不被重用（下一行是 5 而不是 4）", nid == 5, f"next={nid}")
+    conn.execute("DELETE FROM holding_identity WHERE symbol = 'X'")
+    conn.commit()
+
+    real_add = wl.add
+    calls = []
+
+    def flaky_add(c, t, *a, **k):
+        calls.append(t)
+        if t == "MU":
+            raise RuntimeError("中途出错")
+        return real_add(c, t, *a, **k)
+
+    mig.wl.add = flaky_add
+    try:
+        mig.apply(conn, yml)
+    except RuntimeError:
+        pass
+    finally:
+        mig.wl.add = real_add
+    check("播种中途出错 → 全部回滚，清单仍未写过", not wl.is_seeded(conn) and wl.entries(conn) == [],
+          f"seeded={wl.is_seeded(conn)}")
+    mig.apply(conn, yml)
+    check("重跑后完整播种 4 条", sorted(e["ticker"] for e in wl.entries(conn)) == ["MU", "NVDA", "QQQ", "SPY"])
+    conn.close()
+
 print()
 if failures:
     print(f"{len(failures)} 项失败: {failures}")

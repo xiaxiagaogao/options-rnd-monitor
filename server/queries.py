@@ -191,6 +191,7 @@ def identity_info(c, symbol: str, long: bool) -> dict:
 
 def holding_identity_set(payload: dict) -> dict:
     """登记 / 改动标的身份。只收 RND 池内标的（身份跟标的走，不再要求当前持有）。"""
+    import sqlite3
     from rnd import identity as ident
     sym = str(payload.get("symbol") or "").strip().upper()
     idn = payload.get("identity")
@@ -206,6 +207,10 @@ def holding_identity_set(payload: dict) -> dict:
             rec = ident.set_identity(c, sym, idn)
         except ValueError as e:   # 如 index 用在 SPY / QQQ 以外
             return {"ok": False, "error": str(e)}
+        except sqlite3.IntegrityError as e:   # 身份表还是旧 CHECK（未迁移）
+            return {"ok": False, "error": f"写入被数据库拒绝（{e}），可能还没跑迁移"}
+        from rnd import watchlist as wl
+        wl.record_role_change(c, sym, rec)   # 让 /api/watchlist 的 updated_at 跟上
         return {"ok": True, **rec, "identity_history": ident.history(c, sym)}
     finally:
         c.close()
@@ -265,10 +270,14 @@ def watchlist_manage() -> dict:
 
 def watchlist_mutate(op: str, payload: dict) -> dict:
     """add / update / remove / recheck。add 与 recheck 之后起 worker 做准入与回填。"""
+    import sqlite3
     from rnd import watchlist as wl, watchlist_worker
     ticker = payload.get("ticker")
     c = conn()
     try:
+        if not wl.is_seeded(c):
+            # 未迁移时第一次写入会让池从 symbols.yaml 一下切到「只有这一个待检查的标的」
+            return {"ok": False, "error": "自选清单还没初始化：先在服务器上跑 scripts/migrate_watchlist.py --apply"}
         if op == "add":
             e = wl.add(c, ticker, payload.get("role"), payload.get("binance") or None)
         elif op == "update":
@@ -281,11 +290,17 @@ def watchlist_mutate(op: str, payload: dict) -> dict:
             e = wl.recheck(c, ticker)
     except wl.WatchlistError as err:
         return {"ok": False, "error": str(err)}
+    except sqlite3.IntegrityError as err:   # 例：身份表还是旧 CHECK（未迁移）却要设「指数」
+        return {"ok": False, "error": f"写入被数据库拒绝（{err}），可能还没跑迁移"}
     finally:
         c.close()
+    out = {"ok": True, "entry": e}
     if op in ("add", "recheck"):
-        watchlist_worker.spawn()
-    return {"ok": True, "entry": e}
+        try:
+            watchlist_worker.spawn()
+        except Exception as err:  # noqa: BLE001  已写入就算成功；worker 没起来由下次 eod 补上
+            out["warning"] = f"已加入，但后台检查没能启动（{type(err).__name__}），明早更新后会自动处理"
+    return out
 
 def symbol_detail(symbol: str) -> dict:
     c = conn()

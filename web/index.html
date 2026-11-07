@@ -216,12 +216,12 @@
                 </div>
               </template>
               <div v-else class="annot" style="padding:12px 0">
-                当前池内无币安持仓。池由 fund.db 每日同步驱动，建仓后次个 EOD 自动纳入。
+                清单里的标的目前都没有币安持仓。新开的仓不会自动进 RND，要在「自选清单」里加。
               </div>
               <div class="annot" style="margin-top:12px;border-top:1px dashed #E4E1D9;padding-top:8px">
                 入场日 @ 加权均价 · 灯示最新收盘是否跌破入场日 Q05<br>
-                持仓 {{ holdings.length }} 只 · RND 池 {{ symbols.length }} 只（基准 + 持仓驱动）<span
-                  v-if="holdingsOutOfPool.length">· 池外 {{ holdingsOutOfPool.length }} 只不进算图（{{ holdingsOutOfPool.join(' ') }}）</span>
+                持仓 {{ holdings.length }} 只在池内 · RND 池 {{ symbols.length }} 只（自选清单）<span
+                  v-if="holdingsOutOfPool.length">· 另有 {{ holdingsOutOfPool.length }} 只持仓不在清单、不进算图（{{ holdingsOutOfPool.join(' ') }}）</span>
               </div>
             </div>
           </div>

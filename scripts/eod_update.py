@@ -193,21 +193,22 @@ def should_push(res: dict) -> bool:
 
 def main():
     """整个运行期间持 ThetaData 锁（与自选清单 worker 的准入 / 回填互斥）；结束后若清单还有
-    待处理条目（准入 / 回填排队或上次出错），起一个 worker 接着做。"""
+    待处理或卡住的条目，起一个 worker 接着做。"""
+    import contextlib
     from rnd.thetalock import thetadata_lock
-    try:
-        with thetadata_lock(blocking=False):
-            _run()
-    except BlockingIOError:
-        print("ThetaData 锁被占用（自选清单 worker 在准入 / 回填），等它结束 …", flush=True)
+    with contextlib.ExitStack() as stack:
+        # 只有「拿锁」放在 try 里：_run() 内部若冒出 BlockingIOError 不能被当成锁竞争而重跑一遍
         try:
-            with thetadata_lock(timeout=LOCK_WAIT_MAX_S):
-                _run()
-        except TimeoutError:
-            # worker 卡住也不能把每日更新拖没：超时就不等了，照常跑（可能撞 ThetaData 单会话，
-            # 撞了按单标的失败处理，比整天没数据好）。
-            print(f"等 ThetaData 锁超过 {LOCK_WAIT_MAX_S // 60} 分钟，不再等，照常更新", flush=True)
-            _run()
+            stack.enter_context(thetadata_lock(blocking=False))
+        except BlockingIOError:
+            print("ThetaData 锁被占用（自选清单 worker 在准入 / 回填），等它结束 …", flush=True)
+            try:
+                stack.enter_context(thetadata_lock(timeout=LOCK_WAIT_MAX_S))
+            except TimeoutError:
+                # worker 卡住也不能把每日更新拖没：超时就不等了，照常跑（可能撞 ThetaData 单会话，
+                # 撞了按单标的失败处理，比整天没数据好）。
+                print(f"等 ThetaData 锁超过 {LOCK_WAIT_MAX_S // 60} 分钟，不再等，照常更新", flush=True)
+        _run()
     _spawn_watchlist_worker()
 
 
@@ -216,7 +217,7 @@ def _spawn_watchlist_worker():
     try:
         conn = db.get_conn()
         try:
-            pending = watchlist.pending_jobs(conn)
+            pending = watchlist.needs_worker(conn)   # 含被杀后卡在 checking / backfilling 的
         finally:
             conn.close()
         if pending:

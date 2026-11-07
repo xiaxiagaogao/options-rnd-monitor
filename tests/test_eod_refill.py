@@ -356,12 +356,37 @@ def test_main_lock_wait_capped():
     check("超时后仍跑完并推送", events == ["push"], f"events={events}")
     check("日志说明不再等锁", "不再等" in log, f"log={log[-200:]!r}")
 
+
+def test_main_stuck_entry_and_blockingio():
+    print("\n[W3] main：卡在 backfilling 的条目也会触发 worker；_run 内的 BlockingIOError 不被当成锁竞争重跑")
+    from rnd import watchlist, watchlist_worker
+    theta = FakeTheta({"SPY": {REF}, "QQQ": {REF}})
+    conn = _conn(["SPY", "QQQ"])
+    watchlist.add(conn, "AMD", "speculative")
+    watchlist.set_stage(conn, "AMD", "backfilling")       # worker 被杀留下的
+    with mock.patch.object(watchlist_worker, "spawn") as sp:
+        _main(theta, conn, OPEN)
+    check("卡住的条目也触发 worker", sp.call_count == 1, f"calls={sp.call_count}")
+    runs = []
+
+    def boom():
+        runs.append(1)
+        raise BlockingIOError("非锁的 BlockingIOError")
+
+    raised = None
+    with mock.patch.object(eod_update, "_run", boom):
+        try:
+            eod_update.main()
+        except BlockingIOError as e:
+            raised = e
+    check("_run 只跑一次、异常原样抛出", runs == [1] and raised is not None, f"runs={runs}")
+
 for fn in (test_partial_unpublished_goes_to_refill, test_holiday_all_empty_no_refill,
            test_all_empty_on_trading_day_refills_all, test_all_empty_before_close_no_refill,
            test_calendar_failure_fails_safe, test_refill_gives_up_after_max_tries,
            test_fetch_error_not_refilled, test_weekend_with_late_data_still_pushes,
            test_main_pushes_after_refill, test_main_spawns_watchlist_worker,
-           test_main_lock_wait_capped):
+           test_main_lock_wait_capped, test_main_stuck_entry_and_blockingio):
     try:
         fn()
     except Exception as e:  # noqa: BLE001  一项崩不挡其它项

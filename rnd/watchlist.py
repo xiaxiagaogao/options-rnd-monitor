@@ -115,7 +115,9 @@ def ready_tickers(conn) -> list[str]:
 
 
 def add(conn, ticker: str, role: str, binance: str | None = None, *,
-        stage: str = "queued", now: dt.datetime | None = None, source: str | None = None) -> dict:
+        stage: str = "queued", now: dt.datetime | None = None, source: str | None = None,
+        commit: bool = True) -> dict:
+    """加入清单。先全部校验再写；清单行、身份行、流水在同一事务里提交（commit=False 由调用方提交）。"""
     t = _ticker(ticker)
     _check_role(t, role)
     b = _binance(binance, t)
@@ -124,32 +126,50 @@ def add(conn, ticker: str, role: str, binance: str | None = None, *,
     if _row(conn, t) is not None:
         raise WatchlistError(f"{t} 已在自选清单")
     at = _now(now)
-    conn.execute("INSERT INTO watchlist (ticker, binance, stage, added_at, updated_at)"
-                 " VALUES (?, ?, ?, ?, ?)", (t, b, stage, at, at))
-    ident.set_identity(conn, t, role, now=now)        # 相同身份不新增行；自带 commit
-    _event(conn, t, "add", {"role": role, "binance": b, "stage": stage,
-                            **({"source": source} if source else {})}, at)
-    conn.commit()
+    try:
+        conn.execute("INSERT INTO watchlist (ticker, binance, stage, added_at, updated_at)"
+                     " VALUES (?, ?, ?, ?, ?)", (t, b, stage, at, at))
+        ident.set_identity(conn, t, role, now=now, commit=False)   # 相同身份不新增行
+        _event(conn, t, "add", {"role": role, "binance": b, "stage": stage,
+                                **({"source": source} if source else {})}, at)
+    except Exception:
+        conn.rollback()
+        raise
+    if commit:
+        conn.commit()
     return entry(conn, t)
 
 
 def update(conn, ticker: str, *, role: str | None = None, binance: str | None = None,
            now: dt.datetime | None = None) -> dict:
+    """改角色 / 合约名。先全部校验再写，同一事务提交——不会出现「角色改了、合约名报错」的半写。"""
     t = _ticker(ticker)
     row = _require(conn, t)
-    at = _now(now)
     if role is not None:
         _check_role(t, role)
-        rec = ident.set_identity(conn, t, role, now=now)
-        if rec["changed"]:
-            _event(conn, t, "role", {"from": rec["prev_identity"], "to": role}, at)
-    if binance is not None:
-        b = _binance(binance, t)
-        if b != row[1]:
+    b = _binance(binance, t) if binance is not None else None
+    at = _now(now)
+    try:
+        if role is not None:
+            rec = ident.set_identity(conn, t, role, now=now, commit=False)
+            if rec["changed"]:
+                _event(conn, t, "role", {"from": rec["prev_identity"], "to": role}, at)
+        if b is not None and b != row[1]:
             conn.execute("UPDATE watchlist SET binance = ?, updated_at = ? WHERE ticker = ?", (b, at, t))
             _event(conn, t, "binance", {"from": row[1], "to": b}, at)
+    except Exception:
+        conn.rollback()
+        raise
     conn.commit()
     return entry(conn, t)
+
+
+def record_role_change(conn, ticker: str, rec: dict):
+    """标的页持仓卡直接改身份（不经清单）时补一条 role 流水，让 /api/watchlist 的 updated_at 跟上。"""
+    if rec.get("changed") and _row(conn, ticker) is not None:
+        _event(conn, ticker, "role", {"from": rec.get("prev_identity"), "to": rec["identity"],
+                                      "source": "symbol_card"}, rec["changed_at"])
+        conn.commit()
 
 
 def remove(conn, ticker: str, *, now: dt.datetime | None = None):
@@ -198,6 +218,14 @@ def reset_stale(conn) -> list[str]:
     return stale
 
 
+def needs_worker(conn) -> list[str]:
+    """需要 worker 的条目：待处理（queued / error）+ 残留的 checking / backfilling（worker 被杀、
+    机器重启留下的）。eod_update 收尾据此决定要不要起 worker；worker 启动时先把残留复位。"""
+    return [r[0] for r in conn.execute(
+        "SELECT ticker FROM watchlist WHERE stage IN ('queued', 'error', 'checking', 'backfilling')"
+        " ORDER BY added_at, ticker")]
+
+
 def pending_jobs(conn) -> list[str]:
     """worker 待处理：queued + error（error 每次 worker 运行重试一次），按加入顺序。"""
     return [r[0] for r in conn.execute(
@@ -213,9 +241,16 @@ def payload(conn) -> dict:
     """GET /api/watchlist 的响应体（watchlist spec §6.1）。"""
     public = [{k: e[k] for k in ("ticker", "role", "binance", "status", "reason",
                                  "added_at", "role_changed_at")} for e in entries(conn)]
-    last = conn.execute("SELECT at FROM watchlist_events ORDER BY event_id DESC LIMIT 1").fetchone()
+    # updated_at = 清单流水与在单标的角色变化里最晚的那个（标的页也能改身份）；按真实时刻比，不按字符串
+    stamps = [r[0] for r in conn.execute("SELECT at FROM watchlist_events ORDER BY event_id DESC LIMIT 1")]
+    stamps += [e["role_changed_at"] for e in public if e["role_changed_at"]]
     return {
         "version": hashlib.sha256(canonical_json(public).encode("utf-8")).hexdigest(),
-        "updated_at": last[0] if last else None,
+        "updated_at": max(stamps, key=_instant) if stamps else None,
         "entries": public,
     }
+
+
+def _instant(ts: str) -> float:
+    d = dt.datetime.fromisoformat(ts)
+    return (d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)).timestamp()
