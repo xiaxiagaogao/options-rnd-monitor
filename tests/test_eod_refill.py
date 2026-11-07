@@ -332,11 +332,36 @@ def test_main_spawns_watchlist_worker():
         free = False
     check("main 结束后锁已释放", free)
 
+
+def test_main_lock_wait_capped():
+    print("\n[W2] main：锁被 worker 占着 → 等待有上限，超时照常更新（不把当天推送拖没）")
+    import threading
+    from rnd.thetalock import thetadata_lock
+    hold, rel = threading.Event(), threading.Event()
+
+    def holder():
+        with thetadata_lock():
+            hold.set()
+            rel.wait(10)
+
+    th = threading.Thread(target=holder)
+    th.start()
+    hold.wait(5)
+    theta = FakeTheta({"SPY": {REF}, "QQQ": {REF}})
+    with mock.patch.object(eod_update, "LOCK_WAIT_MAX_S", 1), \
+         mock.patch("rnd.thetalock.time.sleep", lambda s: None):
+        events, pushed, log = _main(theta, _conn(["SPY", "QQQ"]), OPEN)
+    rel.set()
+    th.join()
+    check("超时后仍跑完并推送", events == ["push"], f"events={events}")
+    check("日志说明不再等锁", "不再等" in log, f"log={log[-200:]!r}")
+
 for fn in (test_partial_unpublished_goes_to_refill, test_holiday_all_empty_no_refill,
            test_all_empty_on_trading_day_refills_all, test_all_empty_before_close_no_refill,
            test_calendar_failure_fails_safe, test_refill_gives_up_after_max_tries,
            test_fetch_error_not_refilled, test_weekend_with_late_data_still_pushes,
-           test_main_pushes_after_refill, test_main_spawns_watchlist_worker):
+           test_main_pushes_after_refill, test_main_spawns_watchlist_worker,
+           test_main_lock_wait_capped):
     try:
         fn()
     except Exception as e:  # noqa: BLE001  一项崩不挡其它项

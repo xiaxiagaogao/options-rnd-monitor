@@ -123,6 +123,48 @@ with tempfile.TemporaryDirectory() as tmp:
         free = False
     check("worker 结束后锁已释放", free)
 
+print("[锁等待上限 / 回填超时]")
+with tempfile.TemporaryDirectory() as tmp2:
+    lk = Path(tmp2) / "theta.lock"
+    hold, rel = threading.Event(), threading.Event()
+
+    def holder2():
+        with thetalock.thetadata_lock(lk):
+            hold.set()
+            rel.wait(5)
+
+    th2 = threading.Thread(target=holder2)
+    th2.start()
+    hold.wait(5)
+    t0 = time.time()
+    timed_out = False
+    try:
+        with thetalock.thetadata_lock(lk, timeout=0.5, poll=0.1):
+            pass
+    except TimeoutError:
+        timed_out = True
+    check("锁被占且超过等待上限 → TimeoutError", timed_out and 0.4 <= time.time() - t0 < 2,
+          f"{time.time() - t0:.2f}s")
+    rel.set()
+    th2.join()
+    with thetalock.thetadata_lock(lk, timeout=0.5, poll=0.1):
+        check("锁释放后带上限也能拿到", True)
+
+    import subprocess as sp
+    calls = []
+
+    def fake_call(args, timeout=None, **kw):
+        calls.append(timeout)
+        raise sp.TimeoutExpired(args, timeout)
+
+    orig = worker.subprocess.call
+    worker.subprocess.call = fake_call
+    try:
+        rc = worker._backfill_subprocess("ZZZ")
+    finally:
+        worker.subprocess.call = orig
+    check("回填带超时，超时返回非 0 而不是抛出", rc != 0 and calls == [worker.BACKFILL_TIMEOUT_S], f"rc={rc} calls={calls}")
+
 print()
 if failures:
     print(f"{len(failures)} 项失败: {failures}")

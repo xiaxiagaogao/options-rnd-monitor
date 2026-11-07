@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backfill import DTE_MAX, DTE_MIN, compute_symbol, with_retry  # 复用计算循环与重试
 
 
+LOCK_WAIT_MAX_S = 90 * 60   # 等自选清单 worker 释放 ThetaData 锁的上限（单标的回填约 25–30 分钟）
 REFILL_WAIT_MIN = 25   # 当次补拉间隔（分钟）
 REFILL_TRIES = 3       # 补拉次数上限。总窗口 ≤ 75 分钟是硬约束：market-agent 07:40 SGT
                        # 读 RND 读数（夏令时补拉最晚约 23:15 UTC 收尾），拉长须同步挪它的 cron。
@@ -199,7 +200,13 @@ def main():
             _run()
     except BlockingIOError:
         print("ThetaData 锁被占用（自选清单 worker 在准入 / 回填），等它结束 …", flush=True)
-        with thetadata_lock():
+        try:
+            with thetadata_lock(timeout=LOCK_WAIT_MAX_S):
+                _run()
+        except TimeoutError:
+            # worker 卡住也不能把每日更新拖没：超时就不等了，照常跑（可能撞 ThetaData 单会话，
+            # 撞了按单标的失败处理，比整天没数据好）。
+            print(f"等 ThetaData 锁超过 {LOCK_WAIT_MAX_S // 60} 分钟，不再等，照常更新", flush=True)
             _run()
     _spawn_watchlist_worker()
 

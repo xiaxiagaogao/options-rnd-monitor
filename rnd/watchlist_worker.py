@@ -17,6 +17,7 @@ from .config import OUTPUT_DIR, PROJECT_ROOT
 from .thetalock import thetadata_lock
 
 WORKER_LOG = OUTPUT_DIR / "watchlist_worker.log"
+BACKFILL_TIMEOUT_S = 3 * 3600   # 单标的 3 年回填实测约 25–30 分钟；卡住 3 小时就杀掉记 error，免得锁被一直占着
 
 
 def reject_reason(chk: dict) -> str | None:
@@ -38,10 +39,14 @@ def _backfill_subprocess(ticker: str) -> int:
     log = OUTPUT_DIR / f"backfill_watchlist_{ticker}.log"
     log.parent.mkdir(exist_ok=True)
     with open(log, "ab") as fh:
-        return subprocess.call(
-            [sys.executable, str(PROJECT_ROOT / "scripts" / "backfill.py"),
-             "--symbols", ticker, "--years", "3"],
-            stdout=fh, stderr=subprocess.STDOUT, cwd=PROJECT_ROOT)
+        try:
+            return subprocess.call(
+                [sys.executable, str(PROJECT_ROOT / "scripts" / "backfill.py"),
+                 "--symbols", ticker, "--years", "3"],
+                stdout=fh, stderr=subprocess.STDOUT, cwd=PROJECT_ROOT, timeout=BACKFILL_TIMEOUT_S)
+        except subprocess.TimeoutExpired:   # call() 超时会先杀掉子进程再抛
+            fh.write(f"\n回填超过 {BACKFILL_TIMEOUT_S // 3600} 小时，已终止\n".encode())
+            return -9
 
 
 def _has_pinned(conn, ticker: str) -> bool:
