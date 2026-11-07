@@ -212,28 +212,31 @@ def roll_check():
     return {"ok": True, "repinned": repinned}
 
 
-@app.get("/api/admission/{symbol}", dependencies=[Depends(require_auth)])
-def admission(symbol: str):
-    from rnd.admission import check_candidate, pool_reference
-    return {"candidate": check_candidate(valid_symbol(symbol)), "pool": pool_reference()}
+# ---------- 自选清单（watchlist spec，2026-11-07）：池的唯一来源 ----------
+# 旧的「添加标的」后门（/api/admission、/api/pool/add、/api/pool/status）已下线：它们在 uvicorn
+# 里直接拉 ThetaData，绕过单会话锁。准入与回填改由 rnd/watchlist_worker.py 在锁内串行执行。
+
+@app.get("/api/watchlist")
+def watchlist_public(authorization: str | None = Header(default=None)):
+    """机器接口（与 /api/context 同一个 token）：pi-tradpod 据此同步交易名单与角色。"""
+    require_context_token(authorization)
+    return q.watchlist_payload()
 
 
-@app.post("/api/pool/add", dependencies=[Depends(require_auth)])
-def pool_add(payload: dict = Body(...)):
-    from rnd.admission import check_candidate
-    from . import pool
-    sym = valid_symbol(payload.get("symbol", ""))
-    # 换入前强制准入（spec §2）——服务端复核，不信任前端结论
-    chk = check_candidate(sym)
-    if not chk.get("ok") or not chk.get("verdict"):
-        return {"ok": False, "error": "准入检查未通过", "check": chk}
-    return pool.swap_in(sym, payload.get("replace"))
+@app.get("/api/watchlist/manage", dependencies=[Depends(require_auth)])
+def watchlist_manage():
+    return q.watchlist_manage()
 
 
-@app.get("/api/pool/status", dependencies=[Depends(require_auth)])
-def pool_status():
-    from . import pool
-    return pool.status()
+@app.post("/api/watchlist/{op}", dependencies=[Depends(require_auth)])
+def watchlist_mutate(op: str, payload: dict = Body(...)):
+    """op ∈ add / update / remove / recheck；业务错误（重复、非法输入、不在清单）→ 400。"""
+    if op not in ("add", "update", "remove", "recheck"):
+        raise HTTPException(404, "未知操作")
+    r = q.watchlist_mutate(op, payload)
+    if not r["ok"]:
+        raise HTTPException(400, r["error"])
+    return r
 
 
 @app.get("/api/diagnostics/{symbol}/{date}/{expiry}", dependencies=[Depends(require_auth)])

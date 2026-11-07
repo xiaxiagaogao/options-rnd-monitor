@@ -130,8 +130,8 @@ def test_symbol_whitelist():
             check(f"校验器拒绝 {bad!r}", False, "竟然放行了")
         except Exception as e:                       # noqa: BLE001
             check(f"校验器拒绝 {bad!r}", getattr(e, "status_code", None) == 400, type(e).__name__)
-    r = client.post("/api/pool/add", json={"symbol": "X' OR '1'='1"})
-    check("pool/add 非法 symbol 被拒", r.status_code == 400, f"HTTP {r.status_code}")
+    r = client.post("/api/watchlist/add", json={"ticker": "X' OR '1'='1", "role": "speculative"})
+    check("watchlist/add 非法 symbol 被拒", r.status_code == 400, f"HTTP {r.status_code}")
 
     for good in ["SPY", "BRK.B", "RDS-A"]:
         check(f"合法 symbol 通过校验 {good}", api.valid_symbol(good) == good)

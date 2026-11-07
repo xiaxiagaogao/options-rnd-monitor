@@ -1,6 +1,7 @@
 """仪表盘只读查询层：五表 → 前端 JSON。派生逻辑尽量下沉到这里，路由保持薄。"""
 import datetime as dt
 import json
+import re
 import uuid
 from functools import lru_cache
 
@@ -209,6 +210,82 @@ def holding_identity_set(payload: dict) -> dict:
     finally:
         c.close()
 
+
+
+# ---------- 自选清单（watchlist spec §6）----------
+
+def watchlist_payload() -> dict:
+    """GET /api/watchlist 的响应体（机器接口）。只读，不碰 ThetaData / fund.db。"""
+    from rnd import watchlist as wl
+    c = conn()
+    try:
+        return wl.payload(c)
+    finally:
+        c.close()
+
+
+def _backfill_progress(ticker: str) -> str | None:
+    """回填日志尾部的进度白话（拉取 n/m → 计算中 → 完成）。"""
+    from rnd.config import OUTPUT_DIR
+    log = OUTPUT_DIR / f"backfill_watchlist_{ticker}.log"
+    if not log.exists():
+        return None
+    tail = log.read_text(errors="replace")[-3000:]
+    if "回填完成" in tail.rsplit("回填窗口", 1)[-1]:
+        return "回填完成，收尾中"
+    m = re.findall(r"\[(\d+)/(\d+)\]", tail)
+    if "待计算" in tail.rsplit("回填窗口", 1)[-1]:
+        return "计算指标中"
+    return f"拉取到期 {m[-1][0]}/{m[-1][1]}" if m else "回填中"
+
+
+def watchlist_manage() -> dict:
+    """面板「自选清单」页：条目 + stage / 准入指标 / 最新数据日 / 回填进度，附持仓里有、清单里没有的标的。"""
+    from rnd import admission, holdings_sync, identity as ident, watchlist as wl
+    c = conn()
+    try:
+        items = wl.entries(c)
+        for e in items:
+            e["data_latest"] = latest_date(c, e["ticker"])
+            e["progress"] = _backfill_progress(e["ticker"]) if e["stage"] == "backfilling" else None
+        try:
+            held = sorted(holdings_sync.entry_dates(c))
+        except Exception:  # noqa: BLE001  fund.db 读不到不影响清单管理
+            held = None
+    finally:
+        c.close()
+    listed = {e["ticker"] for e in items}
+    return {
+        "entries": items,
+        "holdings_missing": None if held is None else [t for t in held if t not in listed],
+        "index_tickers": list(ident.INDEX_TICKERS),
+        "thresholds": {"max_atm_spread": admission.MAX_ATM_SPREAD, "min_two_sided": admission.MIN_TWO_SIDED},
+    }
+
+
+def watchlist_mutate(op: str, payload: dict) -> dict:
+    """add / update / remove / recheck。add 与 recheck 之后起 worker 做准入与回填。"""
+    from rnd import watchlist as wl, watchlist_worker
+    ticker = payload.get("ticker")
+    c = conn()
+    try:
+        if op == "add":
+            e = wl.add(c, ticker, payload.get("role"), payload.get("binance") or None)
+        elif op == "update":
+            e = wl.update(c, ticker, role=payload.get("role") or None,
+                          binance=payload.get("binance") or None)
+        elif op == "remove":
+            wl.remove(c, ticker)
+            e = None
+        else:
+            e = wl.recheck(c, ticker)
+    except wl.WatchlistError as err:
+        return {"ok": False, "error": str(err)}
+    finally:
+        c.close()
+    if op in ("add", "recheck"):
+        watchlist_worker.spawn()
+    return {"ok": True, "entry": e}
 
 def symbol_detail(symbol: str) -> dict:
     c = conn()
