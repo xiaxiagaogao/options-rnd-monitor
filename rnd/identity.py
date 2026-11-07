@@ -2,15 +2,17 @@
 
 身份跟标的走、只追加：holding_identity 表每改一次记一行，当前身份 = 该标的 event_id 最大的一行。
 2026-10 起登记不再要求当前持有，只要求标的在 RND 池内。
-选线规则只在这里定义（spec §4，主 spec §6 纪律）：投机钉 Q25、信念钉 Q05；空头镜像为 Q75 / Q95。
+2026-11 起它也是自选清单的角色历史（watchlist spec）：新增 index（指数，只许 SPY / QQQ）。
+选线规则只在这里定义（spec §4，主 spec §6 纪律）：投机钉 Q25、信念钉 Q05、指数按信念；空头镜像为 Q75 / Q95。
 """
 import datetime as dt
 from zoneinfo import ZoneInfo
 
-IDENTITIES = ("speculative", "conviction")
-LABEL = {"speculative": "投机", "conviction": "信念"}
-_STOP = {("speculative", True): "q25", ("conviction", True): "q05",
-         ("speculative", False): "q75", ("conviction", False): "q95"}
+IDENTITIES = ("speculative", "conviction", "index")
+LABEL = {"speculative": "投机", "conviction": "信念", "index": "指数"}
+INDEX_TICKERS = ("SPY", "QQQ")   # index 角色只许这两只
+_STOP = {("speculative", True): "q25", ("conviction", True): "q05", ("index", True): "q05",
+         ("speculative", False): "q75", ("conviction", False): "q95", ("index", False): "q95"}
 _ET = ZoneInfo("America/New_York")
 _COLS = "symbol, identity, prev_identity, changed_at"
 
@@ -21,8 +23,8 @@ def stop_quantile(identity: str | None, long: bool) -> str | None:
 
 
 def line_pair(long: bool) -> dict[str, str]:
-    """两条候选失效线 {身份: 分位}，未登记时并挂。"""
-    return {k: _STOP[(k, bool(long))] for k in IDENTITIES}
+    """两条候选失效线 {身份: 分位}，未登记时并挂（index 与信念同线，不单列）。"""
+    return {k: _STOP[(k, bool(long))] for k in ("speculative", "conviction")}
 
 
 def _rec(row) -> dict:
@@ -82,6 +84,8 @@ def set_identity(conn, symbol: str, identity: str, *, now: dt.datetime | None = 
     if identity not in IDENTITIES:
         raise ValueError(f"身份只能是 {' / '.join(IDENTITIES)}，收到 {identity!r}")
     symbol = symbol.upper()
+    if identity == "index" and symbol not in INDEX_TICKERS:
+        raise ValueError(f"指数角色只许 {' / '.join(INDEX_TICKERS)}，收到 {symbol}")
     hist = history(conn, symbol)
     cur = hist[0] if hist else None
     if cur and cur["identity"] == identity:

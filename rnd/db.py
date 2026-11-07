@@ -95,10 +95,11 @@ CREATE TABLE IF NOT EXISTS trade_journal (
 
 -- 币安持仓身份登记（holding-identity spec，2026-10-19）：跟标的走、只追加。
 -- 当前身份 = 该标的 event_id 最大的一行；与 trade_journal 一样是用户录入、不可派生。
+-- 2026-11 起兼作自选清单的角色历史，加入 index；已有库的 CHECK 由 scripts/migrate_watchlist.py 重建。
 CREATE TABLE IF NOT EXISTS holding_identity (
   event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
   symbol        TEXT NOT NULL,
-  identity      TEXT NOT NULL CHECK (identity IN ('speculative','conviction')),
+  identity      TEXT NOT NULL CHECK (identity IN ('speculative','conviction','index')),
   prev_identity TEXT,            -- 改动前身份；首次登记为 NULL
   changed_at    TEXT NOT NULL    -- 改动时刻，ISO8601 带服务器时区偏移
 );

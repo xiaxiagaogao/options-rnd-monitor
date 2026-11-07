@@ -194,14 +194,17 @@ def holding_identity_set(payload: dict) -> dict:
     sym = str(payload.get("symbol") or "").strip().upper()
     idn = payload.get("identity")
     if idn not in ident.IDENTITIES:
-        return {"ok": False, "error": "身份只能是 speculative（投机）或 conviction（信念）"}
-    # 池 = symbols.yaml 的 baseline ∪ holdings ∪ pinned（与 overview / 止盈止损页同一权威口径）。
+        return {"ok": False, "error": "身份只能是 speculative（投机）/ conviction（信念）/ index（指数）"}
+    # 池 = 自选清单里 ready 的标的（server/pool.effective_symbols，与 overview / 止盈止损页同一口径）。
     # 2026-10 放宽：不再要求 fund.db 当前持有——平仓后身份仍跟标的走，重新开仓自动沿用。
     if sym not in get_symbols():
         return {"ok": False, "error": f"{sym or '（空）'} 不在 RND 标的池，不能登记身份"}
     c = conn()
     try:
-        rec = ident.set_identity(c, sym, idn)
+        try:
+            rec = ident.set_identity(c, sym, idn)
+        except ValueError as e:   # 如 index 用在 SPY / QQQ 以外
+            return {"ok": False, "error": str(e)}
         return {"ok": True, **rec, "identity_history": ident.history(c, sym)}
     finally:
         c.close()

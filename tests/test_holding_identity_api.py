@@ -69,6 +69,9 @@ r = client.post(URL, json={"symbol": "AAA", "identity": "speculative"}).json()
 check("改动记 prev、历史两条", r["changed"] and r["prev_identity"] == "conviction"
       and [h["identity"] for h in r["identity_history"]] == ["speculative", "conviction"], str(r))
 
+r = client.post(URL, json={"symbol": "AAA", "identity": "index"})
+check("非 SPY/QQQ 登记指数 → 400", r.status_code == 400 and "SPY" in r.text, f"{r.status_code} {r.text}")
+
 print("[装配] identity_info")
 c = q.conn()
 info = q.identity_info(c, "AAA", True)

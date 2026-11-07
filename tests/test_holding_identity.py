@@ -80,6 +80,28 @@ with tempfile.TemporaryDirectory() as tmp:
     check("change_note(None) → None", ident.change_note(None) is None)
     conn.close()
 
+print("[指数角色] watchlist spec §2：index 只许 SPY / QQQ，失效线按信念")
+check("index 多头 → q05", ident.stop_quantile("index", True) == "q05")
+check("index 空头 → q95", ident.stop_quantile("index", False) == "q95")
+check("index 文案「指数」", ident.LABEL.get("index") == "指数")
+with tempfile.TemporaryDirectory() as tmp:
+    conn = db.get_conn(Path(tmp) / "t.sqlite")
+    r = ident.set_identity(conn, "spy", "index", now=T1)
+    check("SPY 可登记为指数", r["changed"] and r["identity"] == "index", str(r))
+    ident.set_identity(conn, "QQQ", "conviction", now=T1)
+    r = ident.set_identity(conn, "QQQ", "index", now=T2)
+    check("QQQ 由信念改为指数，文案正确", ident.change_note(r) == "10-25 由信念改为指数", str(ident.change_note(r)))
+    check("回放：改指数之前 QQQ 仍是信念", (ident.as_of(conn, "QQQ", "2026-10-20") or {}).get("identity") == "conviction")
+    check("回放：改指数之后 QQQ 是指数", (ident.as_of(conn, "QQQ", "2026-10-26") or {}).get("identity") == "index")
+    raised = None
+    try:
+        ident.set_identity(conn, "NVDA", "index")
+    except ValueError as e:
+        raised = e
+    check("非 SPY/QQQ 登记指数 → ValueError，不写行",
+          raised is not None and ident.history(conn, "NVDA") == [], str(raised))
+    conn.close()
+
 print()
 if failures:
     print(f"{len(failures)} 项失败: {failures}")
