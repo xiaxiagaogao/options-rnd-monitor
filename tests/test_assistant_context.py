@@ -110,8 +110,8 @@ check("有 position 块", isinstance(ctx.get("position"), dict))
 check("SPY position.open == False", p_spy.get("open") is False, f"got={p_spy.get('open')}")
 
 # --- 6b. 持仓块：有仓时的冻结线/偏移（NVDA，只读）---
-# journal 有开仓 → journal 轨（身份/止损分位）；否则币安持有 → 币安轨（身份未登记、两条线、
-# 本周期冻结）；都没有 → SKIP。用户 08-06 已平掉 NVDA 的 journal 条目，线上走币安轨。
+# journal 有开仓 → journal 轨（身份/止损分位）；否则币安持有 → 币安轨（已登记身份 → 只一条线，
+# 未登记 → 两条线；本周期冻结）；都没有 → SKIP。用户 08-06 已平掉 NVDA 的 journal 条目，线上走币安轨。
 ctx_n = assistant.build_context("NVDA")
 pn = ctx_n.get("position", {})
 c = q.conn()
@@ -136,13 +136,29 @@ if jr:
           isinstance(pn.get("invalidated"), bool) and pn.get("stop_level") is not None,
           f"inv={pn.get('invalidated')} stop={pn.get('stop_level')}")
 elif pn.get("source") == "binance" and pn.get("open") is True:
+    # 读的是真实库：身份登记与否随用户操作变（2026-10-19 起可登记），按当前登记状态分支断言。
+    from rnd import identity as ident
     fz = pn.get("frozen") or {}
-    check("NVDA 币安轨：身份未登记", pn.get("identity") is None and pn.get("stop_q") is None)
+    c = q.conn()
+    reg = ident.current(c).get("NVDA")
+    c.close()
+    lines = pn.get("stop_lines") or {}
     check("NVDA 币安轨：本周期冻结口径", "本周期冻结" in (pn.get("frozen_basis") or ""),
           f"got={pn.get('frozen_basis')}")
-    check("NVDA 币安轨：两条线（投机 Q25 / 信念 Q05）且有收盘确认判定",
-          all(isinstance(((pn.get("stop_lines") or {}).get(k) or {}).get("invalidated"), bool)
-              for k in ("speculative", "conviction")), f"got={pn.get('stop_lines')}")
+    if reg is None:
+        check("NVDA 币安轨：身份未登记", pn.get("identity") is None and pn.get("stop_q") is None)
+        expect_keys = ("speculative", "conviction")
+    else:
+        long = (pn.get("qty") or 0) >= 0
+        check("NVDA 币安轨：身份同登记、stop_q 按身份选线",
+              pn.get("identity") == reg["identity"]
+              and pn.get("stop_q") == ident.stop_quantile(reg["identity"], long),
+              f"got={pn.get('identity')}/{pn.get('stop_q')} 登记={reg['identity']}")
+        expect_keys = (reg["identity"],)
+    check(f"NVDA 币安轨：失效线 {list(expect_keys)} 且有收盘确认判定",
+          set(lines) == set(expect_keys)
+          and all(isinstance((lines.get(k) or {}).get("invalidated"), bool) for k in expect_keys),
+          f"got={lines}")
     fz_q50, sig = fz.get("frozen_q50"), fz.get("frozen_sigma1")
 else:
     print(f"  SKIP  6b：NVDA 无 journal 开仓也无币安持仓（position={pn}）")
