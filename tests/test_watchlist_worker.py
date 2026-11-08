@@ -165,6 +165,72 @@ with tempfile.TemporaryDirectory() as tmp2:
         worker.subprocess.call = orig
     check("回填带超时，超时返回非 0 而不是抛出", rc != 0 and calls == [worker.BACKFILL_TIMEOUT_S], f"rc={rc} calls={calls}")
 
+print("[ThetaData 会话：每次准入前重新登录（回填子进程会把旧会话顶掉，2026-11-08 生产实测）]")
+with tempfile.TemporaryDirectory() as tmp3:
+    path3 = Path(tmp3) / "s.sqlite"
+    c = db.get_conn(path3)
+    for t in ("S1", "S2", "S3"):
+        wl.add(c, t, "speculative")
+    c.close()
+    resets, seq = [], []
+
+    def reset():
+        resets.append(len(seq))
+
+    def chk(t):
+        seq.append(t)
+        return PASS
+
+    def bf(t):
+        c2 = db.get_conn(path3)
+        db.upsert_indicators(c2, {"date": "2026-11-06", "symbol": t, "expiry": "2026-11-20",
+                                  "dte": 14, "gate_pass": 1, "pinned": 1, "roll": 0})
+        c2.commit()
+        c2.close()
+        return 0
+
+    worker.run(db_path=path3, lock_path=Path(tmp3) / "l.lock", check_fn=chk, backfill_fn=bf, session_reset=reset)
+    check("每个标的准入前都重置一次会话", resets == [0, 1, 2], str(resets))
+
+print("[错误原因压成一行白话]")
+grpc = ('<_MultiThreadedRendezvous of RPC that terminated with:\n\tstatus = StatusCode.UNAUTHENTICATED\n'
+        '\tdetails = "Invalid session ID: 123"\n\tdebug_error_string = "UNKNOWN:Error received from peer"\n>')
+b = worker.brief_error(RuntimeError(grpc))
+check("会话被顶掉 → 白话 + 下次自动重试", "会话" in b and "\n" not in b and len(b) < 80, b)
+b = worker.brief_error(ValueError("first line\nsecond line " + "x" * 400))
+check("其它异常 → 只留第一行、限长", b.startswith("ValueError: first line") and "\n" not in b and len(b) <= 160, b)
+
+print("[同一时间只跑一个 worker]")
+with tempfile.TemporaryDirectory() as tmp4:
+    path4 = Path(tmp4) / "o.sqlite"
+    c = db.get_conn(path4)
+    wl.add(c, "ONE", "speculative")
+    c.close()
+    single = Path(tmp4) / "single.lock"
+    hold, rel = threading.Event(), threading.Event()
+
+    def holder3():
+        with thetalock.thetadata_lock(single, blocking=False):
+            hold.set()
+            rel.wait(5)
+
+    th3 = threading.Thread(target=holder3)
+    th3.start()
+    hold.wait(5)
+    got = worker.main(db_path=path4, lock_path=Path(tmp4) / "t.lock", single_path=single,
+                      check_fn=lambda t: THIN, backfill_fn=lambda t: 0)
+    check("已有 worker 在跑 → 新 worker 立即退出、不处理", got is None)
+    rel.set()
+    th3.join()
+    c = db.get_conn(path4)
+    check("条目仍在等（交给正在跑的那个）", wl.entry(c, "ONE")["stage"] == "queued")
+    c.close()
+    got = worker.main(db_path=path4, lock_path=Path(tmp4) / "t.lock", single_path=single,
+                      check_fn=lambda t: THIN, backfill_fn=lambda t: 0)
+    c = db.get_conn(path4)
+    check("没人在跑 → 正常处理", got == ["ONE"] and wl.entry(c, "ONE")["stage"] == "rejected", str(got))
+    c.close()
+
 print()
 if failures:
     print(f"{len(failures)} 项失败: {failures}")

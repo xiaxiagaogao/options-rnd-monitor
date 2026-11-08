@@ -17,7 +17,25 @@ from .config import OUTPUT_DIR, PROJECT_ROOT
 from .thetalock import thetadata_lock
 
 WORKER_LOG = OUTPUT_DIR / "watchlist_worker.log"
+SINGLE_LOCK = OUTPUT_DIR / "watchlist_worker.lock"   # 同一时间只跑一个 worker（与 ThetaData 锁分开）
 BACKFILL_TIMEOUT_S = 3 * 3600   # 单标的 3 年回填实测约 25–30 分钟；卡住 3 小时就杀掉记 error，免得锁被一直占着
+
+
+def brief_error(e: BaseException) -> str:
+    """异常压成给人看的一行：ThetaData 会话被顶掉单独说白话，其余只留第一行并限长。"""
+    text = str(e)
+    if "Invalid session" in text or "UNAUTHENTICATED" in text:
+        return "ThetaData 会话被另一个连接顶掉（免费档只允许单会话），下次自动重试"
+    first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    return f"{type(e).__name__}: {first}"[:160]
+
+
+def _reset_thetadata_session():
+    """丢掉本进程缓存的 ThetaData 客户端，下次调用重新登录。
+    回填在子进程里会新开一个会话，把 worker 手上的旧会话顶掉（免费档单会话，2026-11-08 生产实测：
+    SPCX 回填完，同一 worker 后续 9 个准入检查全报 UNAUTHENTICATED: Invalid session）。"""
+    from . import fetch
+    fetch._client.cache_clear()
 
 
 def reject_reason(chk: dict) -> str | None:
@@ -57,17 +75,18 @@ def _has_pinned(conn, ticker: str) -> bool:
                         (ticker,)).fetchone() is not None
 
 
-def _process(conn, t: str, check_fn, backfill_fn):
+def _process(conn, t: str, check_fn, backfill_fn, session_reset):
     """单个标的：checking → 准入 → rejected / backfilling → 回填 → ready / error。"""
     if not wl.set_stage(conn, t, "checking"):
         return
     try:
+        session_reset()
         chk = check_fn(t)
     except Exception as e:  # noqa: BLE001  单标的出错不拖垮其余
-        wl.set_stage(conn, t, "error", reason=f"准入检查出错：{type(e).__name__}: {e}"[:300])
+        wl.set_stage(conn, t, "error", reason=f"准入检查出错：{brief_error(e)}")
         return
     if not chk.get("ok"):
-        wl.set_stage(conn, t, "error", reason=f"准入检查拉数失败：{chk.get('error')}"[:300])
+        wl.set_stage(conn, t, "error", reason=f"准入检查拉数失败：{brief_error(RuntimeError(chk.get('error')))}")
         return
     reason = reject_reason(chk)
     if reason:
@@ -85,10 +104,12 @@ def _process(conn, t: str, check_fn, backfill_fn):
         wl.set_stage(conn, t, "error", reason=f"回填后仍无可用数据（回填退出码 {rc}），下次自动重试")
 
 
-def run(*, db_path=None, lock_path=None, check_fn=None, backfill_fn=None) -> list[str]:
+def run(*, db_path=None, lock_path=None, check_fn=None, backfill_fn=None,
+        session_reset=None) -> list[str]:
     """处理完所有待处理条目后返回；每个标的本轮最多处理一次（error 留给下一轮重试）。"""
     if check_fn is None:
         from .admission import check_candidate as check_fn
+    session_reset = session_reset or _reset_thetadata_session
     conn_of = (lambda: db.get_conn(db_path)) if db_path else db.get_conn
     done: list[str] = []
     with thetadata_lock(lock_path) as lock_fh:
@@ -105,10 +126,10 @@ def run(*, db_path=None, lock_path=None, check_fn=None, backfill_fn=None) -> lis
                 t = jobs[0]
                 done.append(t)
                 try:
-                    _process(conn, t, check_fn, bf)
+                    _process(conn, t, check_fn, bf, session_reset)
                 except Exception as e:  # noqa: BLE001  任何意外都落到 error，不让条目卡在中间态
                     conn.rollback()
-                    wl.set_stage(conn, t, "error", reason=f"处理出错：{type(e).__name__}: {e}"[:300])
+                    wl.set_stage(conn, t, "error", reason=f"处理出错：{brief_error(e)}")
         finally:
             conn.close()
     return done
@@ -124,5 +145,26 @@ def spawn():
                          stderr=subprocess.STDOUT, cwd=PROJECT_ROOT, start_new_session=True)
 
 
+def main(*, db_path=None, lock_path=None, single_path=None, **kw) -> list[str] | None:
+    """worker 入口：同一时间只跑一个。已有 worker 在跑 → 返回 None 立即退出（新加的条目由它在
+    同一轮里接着处理）。跑完放掉单例锁后再看一眼：若恰好在收尾时又有新条目，就再来一轮。"""
+    from .thetalock import thetadata_lock as _lock
+    done: list[str] = []
+    while True:
+        try:
+            with _lock(single_path or SINGLE_LOCK, blocking=False):
+                done += run(db_path=db_path, lock_path=lock_path, **kw)
+        except BlockingIOError:
+            return None if not done else done
+        conn = db.get_conn(db_path) if db_path else db.get_conn()
+        try:
+            again = wl.pending_jobs(conn)
+        finally:
+            conn.close()
+        if not again or set(again) <= set(done):   # 只剩本轮处理过的 error，留给下次
+            return done
+
+
 if __name__ == "__main__":
-    print("处理完毕：", run() or "无待处理条目", flush=True)
+    got = main()
+    print("已有 worker 在处理，本进程退出" if got is None else f"处理完毕：{got or '无待处理条目'}", flush=True)
